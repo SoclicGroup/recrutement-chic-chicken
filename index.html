@@ -1,0 +1,1406 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Recrutement Chic Chicken</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#FFFFFF">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Recrutement">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font-size:14px}img{max-width:100%}[hidden]{display:none!important}</style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+/* Recrutement Chic Chicken : branchement Supabase (sans compte, accès par code vérifié côté serveur) */
+(function () {
+  var SB_URL = "https://oqchxcofsfqbnvafwgpr.supabase.co";
+  var SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9xY2h4Y29mc2ZxYm52YWZ3Z3ByIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMyMDUxNDIsImV4cCI6MjEwODc4MTE0Mn0.uURgaBfxnbHzCf71WB6o5Ikzer0sJGE9bDTNWcc-6nI";
+  var sb = window.supabase && window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+  var PIN = null, colCb = null, refreshing = null;
+  var uuid = function () { return (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) { var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); })); };
+  async function rpc(fn, args) {
+    var res = await sb.rpc(fn, args);
+    if (res.error) throw { code: 'unavailable', message: res.error.message };
+    return res.data || {};
+  }
+  function emit(rows, fromCache) {
+    if (!colCb) return;
+    var meta = { fromCache: fromCache, hasPendingWrites: false };
+    var docs = rows.map(function (r) { var d = Object.freeze(r.doc); return { id: r.id, exists: true, data: function () { return d; }, metadata: meta }; });
+    colCb({ docs: docs, size: docs.length, empty: !docs.length, metadata: meta, docChanges: function () { return []; } });
+  }
+  async function refresh() {
+    if (!PIN) { emit([], true); return; }
+    if (refreshing) return refreshing;
+    refreshing = (async function () {
+      try {
+        var r = await rpc('recrut_list', { p_pin: PIN });
+        if (r.ok) emit(r.rows || [], false);
+        else { PIN = null; emit([], true); }
+      } catch (e) { /* hors ligne : on garde l'affichage */ }
+      finally { refreshing = null; }
+    })();
+    return refreshing;
+  }
+  setInterval(function () { if (PIN && !document.hidden) refresh(); }, 20000);
+  document.addEventListener('visibilitychange', function () { if (PIN && !document.hidden) refresh(); });
+
+  function fail(r) { var e = (r && r.error) || 'upstream_error'; throw { code: e === 'bad_pin' || e === 'locked' ? 'revoked' : 'invalid_argument', message: e }; }
+  function docRef(path) {
+    var parts = path.split('/'), col = parts[0], id = parts[1];
+    return {
+      id: id, path: path,
+      get: async function () { return { id: id, exists: false, data: function () { }, metadata: { fromCache: false } }; },
+      set: async function (data) {
+        if (col !== 'candidats') return;
+        var res = await sb.from('recrut_candidats').insert({ id: id, doc: data });
+        if (res.error) {
+          if (res.error.code === '23505') return; /* déjà enregistré (relance) */
+          throw { code: res.error.code ? 'invalid_argument' : 'unavailable', message: res.error.message };
+        }
+        if (PIN) refresh();
+      },
+      update: async function (patch) {
+        if (col !== 'candidats') return;
+        var r = await rpc('recrut_patch', { p_pin: PIN, p_id: id, p_patch: patch });
+        if (!r.ok) fail(r);
+        await refresh();
+      },
+      delete: async function () {
+        if (col !== 'candidats') return;
+        var r = await rpc('recrut_delete', { p_pin: PIN, p_id: id });
+        if (!r.ok) fail(r);
+        await refresh();
+      },
+      onSnapshot: function (cb) { setTimeout(function () { cb({ id: id, exists: false, data: function () { }, metadata: { fromCache: false } }); }, 0); return function () { }; }
+    };
+  }
+  var collection = function (path) {
+    var c = {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || uuid())); },
+      orderBy: function () { return c; }, where: function () { return c; }, limit: function () { return c; },
+      onSnapshot: function (cb) { colCb = cb; setTimeout(refresh, 0); return function () { colCb = null; }; }
+    };
+    return c;
+  };
+  var db = sb ? { doc: docRef, collection: collection } : null;
+
+  /* Documents (CV, permis…) : stockés dans la base, lisibles seulement avec le code */
+  var blobs = new Map(), urls = new Map(), pending = new Set();
+  function compressImg(file) {
+    return new Promise(function (res, rej) {
+      var u = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        var k = Math.min(1, 1800 / Math.max(img.naturalWidth, img.naturalHeight));
+        var cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(img.naturalWidth * k)); cv.height = Math.max(1, Math.round(img.naturalHeight * k));
+        var x = cv.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, cv.width, cv.height); x.drawImage(img, 0, 0, cv.width, cv.height);
+        URL.revokeObjectURL(u); cv.toBlob(function (b) { b ? res(b) : rej({ code: 'unsupported_type' }); }, 'image/jpeg', 0.82);
+      };
+      img.onerror = function () { URL.revokeObjectURL(u); rej({ code: 'unsupported_type' }); };
+      img.src = u;
+    });
+  }
+  function toB64(blob) { return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(String(r.result).split(',')[1] || ''); }; r.onerror = rej; r.readAsDataURL(blob); }); }
+  function fromB64(b64, ct) { var bin = atob(b64), n = bin.length, u = new Uint8Array(n); for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i); return new Blob([u], { type: ct }); }
+  var assets = {
+    upload: async function (file, opt) {
+      opt = opt || {};
+      var ct = file.type || '', blob = file;
+      if (/^image\//.test(ct) || /\.(heic|heif|jpe?g|png|webp)$/i.test(file.name || '')) { blob = await compressImg(file); ct = 'image/jpeg'; }
+      else if (ct !== 'application/pdf') throw { code: 'unsupported_type' };
+      if (blob.size > 10 * 1024 * 1024) throw { code: 'too_large' };
+      var r = await rpc('recrut_doc_add', { p_pin: PIN, p_cand: opt.cand, p_label: opt.label || '', p_name: file.name || '', p_ct: ct, p_data: await toB64(blob) });
+      if (!r.ok) throw { code: r.error === 'too_large' ? 'too_large' : r.error === 'type' ? 'unsupported_type' : 'upstream_error' };
+      blobs.set(r.id, blob);
+      return { id: r.id, url: '', contentType: ct, sizeBytes: blob.size };
+    },
+    delete: async function (id) {
+      var r = await rpc('recrut_doc_del', { p_pin: PIN, p_id: id });
+      blobs.delete(id); if (urls.has(id)) { URL.revokeObjectURL(urls.get(id)); urls.delete(id); }
+      return { deleted: !!r.ok };
+    }
+  };
+  async function docBlob(id) {
+    if (blobs.has(id)) return blobs.get(id);
+    var r = await rpc('recrut_doc_get', { p_pin: PIN, p_id: id });
+    if (!r.ok) throw { code: 'not_found' };
+    var b = fromB64(r.data, r.ct); blobs.set(id, b); return b;
+  }
+  function docUrl(id) {
+    if (urls.has(id)) return urls.get(id);
+    if (!pending.has(id) && PIN) {
+      pending.add(id);
+      docBlob(id).then(function (b) { urls.set(id, URL.createObjectURL(b)); pending.delete(id); try { render(); } catch (e) { } })
+        .catch(function () { pending.delete(id); });
+    }
+    return '';
+  }
+  var downloads = {
+    save: async function (o) {
+      var blob = o.data instanceof Blob ? o.data : new Blob([o.data]);
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = o.filename; a.rel = 'noopener';
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+      return { status: 'saved' };
+    }
+  };
+  window.__rh = {
+    verify: async function (code) {
+      if (!sb) return { ok: false, error: 'network' };
+      try { var r = await rpc('recrut_check', { p_pin: code }); if (r.ok) { PIN = code; await refresh(); return { ok: true }; } return { ok: false, error: r.error }; }
+      catch (e) { return { ok: false, error: 'network' }; }
+    },
+    out: function () { PIN = null; blobs.clear(); urls.forEach(function (u) { URL.revokeObjectURL(u); }); urls.clear(); emit([], true); },
+    setPin: async function (n) { try { var r = await rpc('recrut_set_pin', { p_pin: PIN, p_new: n }); if (r.ok) PIN = n; return r; } catch (e) { return { ok: false, error: 'network' }; } },
+    docUrl: docUrl, docBlob: docBlob
+  };
+  var caps = { db: db, assets: sb ? assets : null, downloads: downloads, sample: null };
+  window.claude = { use: function (n) { return Promise.resolve(caps[n] || null); } };
+})();
+
+</script>
+</head>
+<body>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+/* Layout: tablette d'abord — une colonne centrée pour le candidat, un tableau dense pour la RH */
+:root{
+  --bg:#FFFFFF; --surface:#FFFFFF; --sunk:#F3F3F3; --ink:#111111; --muted:#5F5F5F; --line:#E2E2E2;
+  --accent:#E2001A; --accent-soft:#FDE6E8; --accent-ink:#FFFFFF;
+  --ok:#2F7D4F; --ok-soft:#E3F1E8; --warn:#B26B00; --warn-soft:#FBEBD0; --bad:#C2332C; --bad-soft:#F8E1DF;
+  --display:"Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --body:"Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --r:12px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0D0D0D; --surface:#171717; --sunk:#222222; --ink:#F4F4F4; --muted:#A6A6A6; --line:#2F2F2F;
+  --accent:#FF2D3D; --accent-soft:#3B1216; --accent-ink:#FFFFFF;
+  --ok:#5DBB83; --ok-soft:#1C3326; --warn:#E6A440; --warn-soft:#3A2B12; --bad:#EE6B62; --bad-soft:#3D1D1A; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0D0D0D; --surface:#171717; --sunk:#222222; --ink:#F4F4F4; --muted:#A6A6A6; --line:#2F2F2F;
+  --accent:#FF2D3D; --accent-soft:#3B1216; --accent-ink:#FFFFFF;
+  --ok:#5DBB83; --ok-soft:#1C3326; --warn:#E6A440; --warn-soft:#3A2B12; --bad:#EE6B62; --bad-soft:#3D1D1A; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0 48px}
+h1,h2,h3{font-family:var(--display);line-height:1.1;text-wrap:balance;margin:0}
+h1{font-size:clamp(28px,5vw,40px);font-weight:800;letter-spacing:-.01em}
+h2{font-size:24px;font-weight:800}
+h3{font-size:17px;font-weight:600}
+p{margin:0}
+.wrap{max-width:880px;margin:0 auto}
+.wide{max-width:1180px;margin:0 auto}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-block:18px;border-bottom:1px solid var(--line);margin-bottom:24px}
+.brand{display:flex;align-items:center;gap:10px;font-family:var(--display);font-weight:800;font-size:19px}
+.mark{width:34px;height:34px;border-radius:50%;background:var(--accent);display:grid;place-items:center;color:var(--accent-ink);font-size:13px;font-family:var(--mono);font-weight:600}
+.muted{color:var(--muted)}
+.small{font-size:14px}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.btn{appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:600 16px var(--body);padding:12px 20px;border-radius:999px;cursor:pointer;min-height:48px;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn.gold{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{min-height:36px;padding:6px 14px;font-size:14px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:focus-visible,.chip:focus-within,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.between{justify-content:space-between}
+.stack{display:flex;flex-direction:column;gap:20px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:620px){.grid2{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:22px}
+.field{display:flex;flex-direction:column;gap:8px;min-width:0}
+.field>label,.qlabel{font-weight:600}
+[hidden]{display:none!important}
+.req::after{content:" *";color:var(--bad)}
+.field.invalid input{border-color:var(--bad);color:var(--bad);background:var(--bad-soft);box-shadow:inset 0 0 0 1px var(--bad)}
+.field.invalid>label{color:var(--bad)}
+.fielderr{color:var(--bad);font-weight:600;font-size:15px}
+.hint{font-size:14px;color:var(--muted)}
+input[type=text],input[type=tel],input[type=email],input[type=date],input[type=number],input[type=password],select,textarea{
+  width:100%;font:500 17px var(--body);color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-height:50px}
+textarea{min-height:120px;resize:vertical;line-height:1.5}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative}
+.chip input{position:absolute;opacity:0;inset:0;cursor:pointer;margin:0}
+.chip span{display:inline-flex;align-items:center;min-height:46px;padding:10px 16px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-weight:500;cursor:pointer;user-select:none}
+.chip input:checked+span{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.opts{display:flex;flex-direction:column;gap:8px}
+.opt{position:relative}
+.opt input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.opt span{display:block;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);cursor:pointer}
+.opt input:checked+span{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink);background:var(--sunk)}
+.progress{display:flex;gap:4px;margin:6px 0 4px}
+.progress i{flex:1;height:6px;border-radius:3px;background:var(--line)}
+.progress i.on{background:var(--accent)}
+.err{background:var(--bad-soft);color:var(--bad);padding:12px 14px;border-radius:10px;font-weight:600}
+.note{background:var(--accent-soft);padding:14px 16px;border-radius:10px}
+.q{display:flex;flex-direction:column;gap:10px;padding-block:16px;border-top:1px solid var(--line)}
+.q:first-child{border-top:0;padding-top:0}
+.calcq{display:grid;grid-template-columns:minmax(0,1fr) 160px;gap:14px;align-items:center;padding-block:14px;border-top:1px solid var(--line)}
+.calcq:first-child{border-top:0}
+@media (max-width:520px){.calcq{grid-template-columns:1fr}}
+.money{position:relative}
+.money input{padding-left:46px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.money::before{content:"CHF";position:absolute;left:12px;top:50%;transform:translateY(-50%);font:600 13px var(--mono);color:var(--muted)}
+.langrow{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;align-items:center;padding-block:10px;border-top:1px solid var(--line)}
+.langrow:first-child{border-top:0}
+@media (max-width:620px){.langrow{grid-template-columns:1fr}}
+.rule{display:flex;flex-direction:column;gap:10px;padding-block:16px;border-top:1px solid var(--line)}
+.rule:first-child{border-top:0;padding-top:0}
+.check{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);cursor:pointer}
+.check input{width:22px;height:22px;margin-top:1px;accent-color:var(--ink);flex:none}
+.foot{display:flex;justify-content:space-between;gap:12px;margin-top:24px;flex-wrap:wrap}
+.hero{padding-block:28px 8px}
+.home-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px}
+@media (max-width:620px){.home-cards{grid-template-columns:1fr}}
+.home-card{text-align:left;display:flex;flex-direction:column;gap:10px;padding:26px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface);cursor:pointer;font:inherit;color:inherit}
+.home-card:hover{border-color:var(--muted)}
+.home-card.feature{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.home-card.feature .muted{color:inherit;opacity:.7}
+.home-card h2{font-size:26px}
+/* RH */
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.toolbar select,.toolbar input{width:auto;min-height:42px;font-size:15px;padding:8px 12px}
+.toolbar input{flex:1;min-width:160px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:12px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--sunk)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.score{display:inline-flex;align-items:baseline;gap:2px;font-family:var(--mono);font-weight:600;font-size:18px}
+.score small{font-size:12px;color:var(--muted);font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.neutral{background:var(--sunk);color:var(--muted)}
+.pill.gold{background:var(--accent-soft);color:var(--ink)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}
+@media (max-width:720px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.stat b{display:block;font-family:var(--mono);font-size:24px;font-variant-numeric:tabular-nums}
+.detail-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:20px;align-items:start}
+@media (max-width:620px){.detail-head{grid-template-columns:1fr}}
+.bigscore{text-align:right}
+.bigscore b{font-family:var(--mono);font-size:56px;line-height:1;font-variant-numeric:tabular-nums}
+.bigscore span{font-family:var(--mono);color:var(--muted);font-size:18px}
+@media (max-width:620px){.bigscore{text-align:left}}
+.bars{display:flex;flex-direction:column;gap:10px}
+.bar{display:grid;grid-template-columns:170px minmax(0,1fr) 72px;gap:12px;align-items:center;font-size:15px}
+@media (max-width:520px){.bar{grid-template-columns:110px minmax(0,1fr) 64px}}
+.track{height:10px;border-radius:5px;background:var(--sunk);overflow:hidden}
+.fill{height:100%;background:var(--accent);border-radius:5px}
+.fill.pending{background:repeating-linear-gradient(45deg,var(--line) 0 6px,transparent 6px 12px)}
+.kv{display:grid;grid-template-columns:200px minmax(0,1fr);gap:8px 16px;font-size:15px}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+@media (max-width:520px){.kv{grid-template-columns:1fr}.kv dd{margin-bottom:6px}}
+.ans{display:flex;flex-direction:column;gap:6px}
+.ansline{display:flex;gap:10px;align-items:flex-start;font-size:15px}
+.ansline .mk{flex:none;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}
+.mk.y{background:var(--ok-soft);color:var(--ok)}
+.mk.n{background:var(--bad-soft);color:var(--bad)}
+.quote{background:var(--sunk);border-radius:10px;padding:12px 14px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
+.alerts{display:flex;flex-wrap:wrap;gap:8px}
+.section-title{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}
+.rating{display:flex;gap:6px;flex-wrap:wrap}
+.rating .chip span{min-width:46px;justify-content:center;font-family:var(--mono)}
+.ratingrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding-block:12px;border-top:1px solid var(--line)}
+.ratingrow:first-child{border-top:0}
+@media (max-width:620px){.ratingrow{grid-template-columns:1fr}}
+.overlay{position:fixed;inset:0;background:rgba(10,9,7,.55);display:grid;place-items:center;z-index:50;padding:16px}
+.modal{background:var(--surface);border-radius:16px;padding:24px;width:min(360px,100%);display:flex;flex-direction:column;gap:16px;border:1px solid var(--line)}
+.pinshow{display:flex;justify-content:center;gap:12px}
+.pinshow i{width:16px;height:16px;border-radius:50%;border:2px solid var(--ink)}
+.pinshow i.f{background:var(--ink)}
+.keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.keypad button{min-height:60px;font:600 22px var(--mono);border-radius:12px;border:1px solid var(--line);background:var(--sunk);color:var(--ink);cursor:pointer}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:12px 20px;border-radius:999px;font-weight:600;z-index:60}
+.banner{background:var(--warn-soft);color:var(--warn);padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:600}
+.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+.docs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.doc{border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;background:var(--surface)}
+.doc .thumb{aspect-ratio:3/4;max-width:100%;display:grid;place-items:center;background:var(--sunk);color:var(--muted);text-decoration:none;font:600 18px var(--mono)}
+.doc .thumb img{width:100%;height:100%;object-fit:cover}
+.doc .meta{padding:8px 10px;display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:20px;overflow-x:auto}
+.tab{appearance:none;background:none;border:0;border-bottom:3px solid transparent;padding:10px 14px;font:600 16px var(--body);color:var(--muted);cursor:pointer;white-space:nowrap;margin-bottom:-1px}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent)}
+.essai-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+@media (max-width:820px){.essai-form{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:520px){.essai-form{grid-template-columns:1fr}}
+.week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+@media (max-width:960px){.week{grid-template-columns:1fr}.emptyday{display:none}}
+.day{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px;display:flex;flex-direction:column;gap:8px;min-height:160px;min-width:0}
+@media (max-width:960px){.day{min-height:0}}
+.day.today{border-color:var(--accent);box-shadow:inset 0 3px 0 var(--accent)}
+.dayhead{display:flex;align-items:baseline;justify-content:space-between;text-transform:capitalize;color:var(--muted);font-weight:600;font-size:14px}
+.dayhead b{font-size:20px;color:var(--ink)}
+.dayempty{padding-top:4px}
+.ecard{appearance:none;text-align:left;font:inherit;color:inherit;display:flex;flex-direction:column;gap:3px;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--sunk);cursor:pointer;border-left:4px solid var(--accent);min-width:0;overflow-wrap:anywhere}
+.ecard.reussi{border-left-color:var(--ok)}.ecard.absent{border-left-color:var(--bad)}.ecard.echec{border-left-color:var(--warn)}
+.ecard:hover{border-color:var(--muted)}
+.etime{font-size:13px;font-weight:600}
+.later{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);overflow:hidden}
+.lrow{appearance:none;font:inherit;color:inherit;background:none;border:0;border-top:1px solid var(--line);display:grid;grid-template-columns:170px minmax(0,1fr) auto;gap:12px;padding:12px 16px;text-align:left;cursor:pointer}
+.lrow:first-child{border-top:0}.lrow:hover{background:var(--sunk)}
+@media (max-width:520px){.lrow{grid-template-columns:1fr;gap:2px}}
+.pill.info{background:var(--sunk);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.checklist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+@media (max-width:620px){.checklist{grid-template-columns:1fr}}
+.check .pill{margin-left:4px}
+.fsel{width:auto;min-height:42px;font-size:15px;padding:8px 12px}
+.sigwrap canvas{display:block;width:100%;max-width:640px;aspect-ratio:3/1;background:#fff;border:2px dashed var(--muted);border-radius:12px;touch-action:none;cursor:crosshair}
+.sigimg{display:block;max-width:300px;width:100%;margin-top:6px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.logo-d{display:none}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .logo-l{display:none}:root:not([data-theme="light"]) .logo-d{display:inline-block}}
+:root[data-theme="dark"] .logo-l{display:none}
+:root[data-theme="dark"] .logo-d{display:inline-block}
+.brand img{flex:none}
+@media (max-width:520px){.brand .muted{display:none}}
+.idlewarn{position:fixed;left:50%;transform:translateX(-50%);top:calc(16px + env(safe-area-inset-top,0px));background:var(--accent);color:var(--accent-ink);padding:14px 22px;border-radius:999px;font-weight:700;z-index:70;box-shadow:0 6px 20px rgba(0,0,0,.25);width:max-content;max-width:calc(100% - 32px);text-align:center}
+.overlay.lock{z-index:48;background:rgba(10,10,10,.94)}
+.oralhelp{background:var(--sunk);border-radius:10px;padding:12px 16px;font-size:15px}
+.oralhelp ul{margin:6px 0 0;padding-left:20px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div id="app"></div>
+
+<script>
+/* ============ DONNÉES ============ */
+const LOGO_L="data:image/png;base64,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";
+const LOGO_D="data:image/png;base64,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";
+const logoImg=(h,extra="")=>`<img class="logo-l" src="${LOGO_L}" alt="Chic Chicken" style="height:${h}px;width:auto${extra}"><img class="logo-d" src="${LOGO_D}" alt="Chic Chicken" style="height:${h}px;width:auto${extra}">`;
+const RESTOS=["Plainpalais","Cornavin","Navigation","Versoix","Pas encore défini"];
+const POSTES=["Équipier polyvalent","Aide-cuisine"];
+const STATUTS=[["nouveau","Nouveau","neutral"],["a_revoir","À revoir","warn"],["essai","Jour d'essai","gold"],["retenu","Retenu","ok"],["vivier","Vivier","info"],["refuse","Refusé","bad"]];
+const LANGS=["Français","Anglais","Allemand","Italien","Espagnol","Portugais","Albanais","Arabe","Turc","Serbe / Croate / Bosnien","Tigrinya","Tamoul","Autre"];
+const NIVEAUX=["Langue maternelle","Courant","Moyen","Débutant"];
+const PERMIS=["Nationalité suisse","Permis C","Permis B","Permis G (frontalier)","Permis L","Permis Ci","Permis F","Permis N","Permis S","Demande en cours","Aucun permis"];
+const NATIONS=["Suisse","France","Portugal","Italie","Espagne","Kosovo","Albanie","Macédoine du Nord","Serbie","Turquie","Maroc","Algérie","Tunisie","Érythrée","Brésil","Autre"];
+const EXP_DUREES=["Aucune","Moins de 6 mois","6 mois à 1 an","1 à 2 ans","2 à 5 ans","Plus de 5 ans"];
+const EXP_PTS={"Aucune":0,"Moins de 6 mois":3,"6 mois à 1 an":5,"1 à 2 ans":7,"2 à 5 ans":8,"Plus de 5 ans":9};
+const JOURS=["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+const CRENEAUX=["Matin (ouverture)","Soir (fermeture)","Les deux"];
+
+const FR_Q=[
+ {q:"Les clients ___ commandé deux menus.",o:["on","ont","onts"],a:1},
+ {q:"Je vous ___ une bonne journée.",o:["souhaite","souhaites","souhaitent"],a:0},
+ {q:"Les frites sont ___.",o:["prête","prêts","prêtes"],a:2},
+ {q:"Il faut ___ les tables après chaque client.",o:["nettoyé","nettoyer","nettoyez"],a:1},
+ {q:"Quelle phrase est correcte ?",o:["Ces poulet sont cuit.","Ses poulets sont cuits.","Ces poulets sont cuits."],a:2},
+];
+const FR_FAUTE="Bonjour, je voudré un menu avec un coca et des frite sil vous plait, merci.";
+const FR_CORRECT="Bonjour, je voudrais un menu avec un coca et des frites, s'il vous plaît, merci.";
+const EN_Q=[
+ {q:"A customer asks: « Can I have the bill, please? » What does he want?",o:["Le menu","L'addition","Une serviette"],a:1},
+ {q:"« For here or to go? » means…",o:["Sur place ou à emporter ?","Vous êtes combien ?","Vous payez comment ?"],a:0},
+ {q:"Sorry, we ___ out of fries at the moment.",o:["is","be","are"],a:2},
+ {q:"A customer asks: « How much is it? » The best answer:",o:["It's 14 francs 90.","It's 2 o'clock.","It's very good."],a:0},
+ {q:"« Could I have it without sauce? » The customer wants…",o:["Plus de sauce","Sans sauce","La sauce à part"],a:1},
+];
+const CALC=[
+ {q:"Un menu à 14.90 et une boisson à 3.50. Total ?",a:18.40},
+ {q:"Le total est de 32.70. Le client paie avec un billet de 50.–. Combien rendez-vous ?",a:17.30},
+ {q:"3 menus à 13.90 chacun. Total ?",a:41.70},
+ {q:"Le total est de 27.80. Le client donne 30.80. Combien rendez-vous ?",a:3.00},
+ {q:"2 burgers à 9.50 et 3 frites à 4.80. Total ?",a:33.40},
+ {q:"Une commande de 45.– avec 10 % de réduction. Prix à payer ?",a:40.50},
+ {q:"Le total est de 63.45. Le client paie avec 100.–. Combien rendez-vous ?",a:36.55},
+ {q:"Un bucket à 24.90 partagé à 3 personnes. Combien paie chacune ?",a:8.30},
+];
+const SITU=[
+ {q:"Un client revient : sa commande n'est pas la bonne et il est énervé. Que faites-vous ?",o:["Je lui dis que c'est lui qui a mal commandé.","Je m'excuse, je refais la bonne commande en priorité et je préviens le responsable si besoin.","Je lui demande de refaire la queue."],a:1},
+ {q:"Vous voyez un collègue toucher du poulet cru, puis le pain des burgers sans se laver les mains.",o:["Je ne dis rien, ce n'est pas mon rôle.","Je lui en parle plus tard dans la semaine.","Je l'arrête tout de suite, le pain est jeté et il se lave les mains. J'informe le responsable."],a:2},
+ {q:"Quand faut-il se laver les mains ?",o:["Seulement en arrivant au travail.","En arrivant, après la pause, après les toilettes, après avoir touché de l'argent ou du cru, et à chaque changement de tâche.","Quand elles sont visiblement sales."],a:1},
+ {q:"Un morceau de poulet cuit tombe par terre en cuisine.",o:["Je le jette.","Je le rince et je le sers.","Je le remets dans le bac s'il a touché le sol moins de 5 secondes."],a:0},
+ {q:"C'est le rush : 10 clients attendent et un collègue est absent.",o:["Je reste calme, je sers dans l'ordre, je préviens le responsable pour réorganiser l'équipe.","Je ferme la caisse le temps que ça se calme.","Je sers d'abord les clients que je connais."],a:0},
+ {q:"Un client demande si un produit contient un allergène et vous ne savez pas.",o:["Je dis « non, normalement pas ».","Je vérifie la fiche allergènes ou je demande au responsable. Je ne devine jamais.","Je lui conseille de prendre autre chose sans vérifier."],a:1},
+];
+const CUISINE=[
+ {q:"Quelle est la température minimale à cœur pour que le poulet soit bien cuit ?",o:["55 °C","63 °C","74 °C"],a:2},
+ {q:"À quelle température doit être le frigo pour la viande crue ?",o:["Entre 0 et 4 °C","Entre 6 et 10 °C","Entre 12 et 15 °C"],a:0},
+ {q:"Comment décongeler du poulet ?",o:["Sur le plan de travail, à température ambiante","Au frigo, la veille","Dans de l'eau chaude"],a:1},
+ {q:"Pour découper du poulet cru puis des légumes, vous utilisez…",o:["La même planche, rincée à l'eau","Des planches et couteaux séparés (couleurs différentes)","La même planche, retournée"],a:1},
+ {q:"Les produits gardés au chaud (bain-marie) doivent rester au-dessus de…",o:["40 °C","50 °C","63 °C"],a:2},
+ {q:"Dans la chambre froide, quel produit utilisez-vous en premier ?",o:["Le plus ancien (premier entré, premier sorti)","Le plus récent","Celui qui est devant"],a:0},
+ {q:"L'huile de la friteuse prend feu. Que faites-vous ?",o:["Je jette de l'eau dessus","Je coupe le gaz/l'électricité et j'étouffe avec le couvercle ou la couverture anti-feu","Je souffle dessus"],a:1},
+ {q:"Un collègue se brûle la main avec de l'huile chaude.",o:["Eau froide pendant 15 à 20 minutes et je préviens le responsable","Je mets du beurre ou de la crème dessus","Je mets de la glace directement"],a:0},
+];
+const EMB=[
+ ["permis","Copie du permis / pièce d'identité","Permis / pièce d'identité"],
+ ["avs","Numéro AVS vérifié (carte AVS)"],
+ ["iban","Coordonnées bancaires (IBAN) reçues"],
+ ["source","Formulaire impôt à la source rempli",null,c=>!["Nationalité suisse","Permis C"].includes(c.answers?.permis)],
+ ["contrat","Contrat de travail signé"],
+ ["assurances","Annonce aux assurances faite (AVS, LAA, LPP)"],
+ ["uniforme","Uniforme et casquette remis"],
+ ["hygiene","Formation hygiène faite"],
+ ["visite","Visite du resto et consignes de sécurité"],
+ ["caisse","Accès caisse créé"],
+ ["planning","Premier planning envoyé"],
+];
+const KEEP_DAYS=183;
+const ORAL=[
+ ["politesse","Politesse","Bonjour, merci, vouvoiement, respect"],
+ ["sourire","Sourire","Sourit naturellement, visage ouvert"],
+ ["amabilite","Amabilité, gentillesse","Agréable, chaleureux avec les gens"],
+ ["aisance","Aisance","1 = très timide · 5 = très à l'aise"],
+ ["dynamisme","Énergie, dynamisme","Vif, motivé, pas mou"],
+ ["communication","Communication, contact visuel","Regarde dans les yeux, s'exprime clairement"],
+ ["frOral","Français à l'oral","Comprend et se fait comprendre"],
+ ["tenue","Présentation & tenue","Propre, soigné, tenue correcte"],
+ ["motivation","Motivation ressentie","A vraiment envie de travailler chez nous"],
+];
+const ARRIVEE=[["En avance",5],["À l'heure",5],["Retard de moins de 5 min",3],["Retard de plus de 5 min",1]];
+const CARACTERE=["Calme","Dynamique","Souriant·e","Sérieux·se","Sûr·e de soi","Respectueux·se","Curieux·se","Timide","Réservé·e","Bavard·e","Stressé·e","Nonchalant·e","Arrogant·e"];
+
+/* ============ ÉTAT ============ */
+let db=null, sample=null, downloads=null, assets=null, uploading=false, confirmDoc=null;
+const RESULTATS=[["prevu","Prévu","gold"],["reussi","Réussi","ok"],["absent","Pas venu","bad"],["echec","Pas concluant","warn"]];
+const pad=n=>String(n).padStart(2,"0");
+const isoDay=d=>d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
+function startOfWeek(d){const x=new Date(d.getFullYear(),d.getMonth(),d.getDate());const wd=(x.getDay()+6)%7;x.setDate(x.getDate()-wd);return x}
+const fmtLong=iso=>iso?new Date(iso+"T12:00:00").toLocaleDateString("fr-CH",{weekday:"short",day:"numeric",month:"short"}):"";
+let lastRH="rh", weekStart=startOfWeek(new Date()), pdfBusy=false;
+const DOC_TYPES=["CV","Photo du candidat","Permis / pièce d'identité","Certificat de travail","Diplôme / attestation","Autre"];
+let candidats=[], loaded=false, loadTimer=null, dbNote="";
+let config={pin:"1234"};
+let view="home", step=0, draft=null, errorMsg="", currentId=null, oralDraft=null;
+let rhUnlocked=false, filt={resto:"",statut:"",q:"",sort:"score",poste:"",presto:"",vresto:""}, confirmDelete=false, aiBusy=false, aiMsg="";
+let pinBusy=false, configLoaded=false, pinCb=null, pinVal="", pinErr="", oralFromRH=false;
+
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const getP=(o,p)=>p.split(".").reduce((a,k)=>a==null?a:a[k],o);
+function setP(o,p,v){const ks=p.split(".");let a=o;ks.slice(0,-1).forEach(k=>{if(a[k]==null||typeof a[k]!=="object")a[k]={};a=a[k]});a[ks.at(-1)]=v}
+const fmtCHF=n=>Number(n).toFixed(2);
+const parseNum=s=>{if(s==null||String(s).trim()==="")return null;const n=parseFloat(String(s).replace(/[^\d,.\-]/g,"").replace(",","."));return isNaN(n)?null:n};
+function age(d){if(!d)return null;const b=new Date(d),n=new Date();let a=n.getFullYear()-b.getFullYear();if(n.getMonth()<b.getMonth()||(n.getMonth()===b.getMonth()&&n.getDate()<b.getDate()))a--;return isNaN(a)?null:a}
+const fmtDate=t=>t?new Date(t).toLocaleDateString("fr-CH",{day:"2-digit",month:"2-digit",year:"numeric"}):"—";
+function toast(m){const t=document.createElement("div");t.className="toast";t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),2600)}
+
+/* ============ SCORES ============ */
+function scoreOf(c){
+  const a=c.answers||{}, P={};
+  if(isCuisine(c)){const kOk=CUISINE.filter((q,i)=>String(getP(a,"ktest."+i))===String(q.a)).length;P.calc={label:"Test cuisine",got:kOk*2.5,max:20}}
+  else{const calcOk=CALC.filter((q,i)=>{const v=parseNum(getP(a,"calc.a."+i));return v!=null&&Math.abs(v-q.a)<0.011}).length;
+  P.calc={label:"Calcul caisse",got:calcOk*2.5,max:20}}
+  const frOk=FR_Q.filter((q,i)=>String(getP(a,"fr.q."+i))===String(q.a)).length;
+  const frT=c.manual?.frText??c.ai?.fr?.score;
+  P.fr={label:"Français écrit",got:frOk*1.4+(frT!=null?Math.min(8,Math.max(0,+frT)):0),max:15,pending:frT==null};
+  const enOk=EN_Q.filter((q,i)=>String(getP(a,"en.q."+i))===String(q.a)).length;
+  const enT=c.manual?.enText??c.ai?.en?.score;
+  P.en={label:"Anglais écrit",got:enOk+(enT!=null?Math.min(5,Math.max(0,+enT)):0),max:10,pending:enT==null};
+  const sOk=SITU.filter((q,i)=>String(getP(a,"situ."+i))===String(q.a)).length;
+  P.situ={label:"Situations & hygiène",got:sOk*2.5,max:15};
+  const m=(+(a.exp?.restoAns||0))*12+(+(a.exp?.restoMois||0));
+  let e=a.exp?.duree!=null?(EXP_PTS[a.exp.duree]??0):(m<=0?0:m<6?3:m<12?5:m<24?7:9); if(a.exp?.caisse==="Oui")e+=1;
+  P.exp={label:"Expérience",got:Math.min(10,e),max:10};
+  const d=a.dispo||{}; let ds=0;
+  if(d.weekend==="Oui"||d.weekend==="Oui, les deux")ds+=3;
+  const cr=Array.isArray(d.creneaux)?d.creneaux.join(" "):String(d.creneaux||""); if(cr==="Les deux"||cr.includes("Soir")||cr.includes("Fermeture"))ds+=2;
+  if((d.jours||[]).length>=5)ds+=2; else if((d.jours||[]).length>=3)ds+=1;
+  if(d.libre==="Tout de suite")ds+=2; else if(d.libre==="Dans 1 à 2 semaines")ds+=1.5; else if(d.libre==="Dans 1 mois")ds+=1;
+  if(d.vacances==="Non")ds+=1;
+  P.dispo={label:"Disponibilité",got:Math.min(10,ds),max:10};
+  const o=c.oral||{}; const vals=ORAL.map(([k])=>+o[k]).filter(v=>v>0); const arr=ARRIVEE.find(x=>x[0]===o.arrivee); if(arr)vals.push(arr[1]);
+  P.oral={label:"Entretien oral",got:vals.length?vals.reduce((x,y)=>x+y,0)/vals.length/5*20:0,max:20,pending:!vals.length};
+  const total=Object.values(P).reduce((s,p)=>s+p.got,0);
+  return {P,total:Math.round(total),pending:Object.values(P).some(p=>p.pending)};
+}
+function alertsOf(c){
+  const a=c.answers||{}, r=a.regles||{}, L=[];
+  const pm=a.permis;
+  if(pm==="Aucun permis")L.push(["bad","Pas d'autorisation de travail"]);
+  else if(["Demande en cours","Permis N","Permis F","Permis S","Permis L"].includes(pm))L.push(["warn","Permis à vérifier ("+pm+")"]);
+  if(a.sexe==="Homme"&&r.barbe==="Oui"&&r.barbeAction==="Non")L.push(["bad","Refuse de raser / couvrir la barbe"]);
+  if(r.piercing==="Oui"&&r.piercingOk==="Non")L.push(["bad","Refuse d'enlever les piercings"]);
+  if(r.tatouage==="Oui"&&r.tatouageOk==="Non")L.push(["bad","Refuse de couvrir les tatouages"]);
+  if(r.cheveux==="Oui"&&r.cheveuxOk==="Non")L.push(["bad","Refuse d'attacher les cheveux"]);
+  const ag=age(a.naissance); if(ag!=null&&ag<18)L.push(["warn","Mineur·e ("+ag+" ans) : horaires limités"]);
+  if(a.dispo?.weekend==="Non")L.push(["warn","Pas dispo le week-end"]);
+  if(a.dispo?.vacances==="Oui, déjà prévues")L.push(["warn","Vacances prévues"+(a.dispo.vacancesDates?" : "+a.dispo.vacancesDates:"")]);
+  const s=scoreOf(c); if(s.P.calc.got<10)L.push(["warn",isCuisine(c)?"Test cuisine faible":"Calcul faible"]);
+  const so=a.sorties||[]; if(so.length)L.push(["warn","A quitté l'app "+so.length+"× pendant le test"]);
+  if(c.statut==="vivier"&&!a.consentVivier)L.push(["warn","Vivier sans accord du candidat"]);
+  const dp=dupsOf(c); if(dp.length)L.push(["warn","Déjà postulé ("+dp.length+"×)"]);
+  const ex=expireOf(c); if(ex){const dl=Math.ceil((ex-Date.now())/864e5);if(dl<=30)L.push(["warn","Suppression auto dans "+Math.max(0,dl)+" j"])}
+  return L;
+}
+const statutInfo=k=>STATUTS.find(s=>s[0]===k)||STATUTS[0];
+const nomComplet=c=>((c.answers?.prenom||"")+" "+(c.answers?.nom||"")).trim()||"Sans nom";
+
+/* ============ RENDU : composants ============ */
+const topBar=(right="")=>`<div class="top"><div class="brand">${logoImg(40)}<span>Chic Chicken <span class="muted" style="font-weight:600">· Recrutement</span></span></div><div class="row">${right}</div></div>`;
+function radio(path,opts,{rerender=false}={}){
+  const cur=getP(draft,path);
+  return `<div class="chips">${opts.map(o=>`<label class="chip"><input type="radio" name="${path}" data-k="${path}" value="${esc(o)}" ${String(cur)===String(o)?"checked":""} ${rerender?'data-rr="1"':""}><span>${esc(o)}</span></label>`).join("")}</div>`;
+}
+function multi(path,opts){
+  const cur=getP(draft,path)||[];
+  return `<div class="chips">${opts.map(o=>`<label class="chip"><input type="checkbox" data-k="${path}" data-multi="1" value="${esc(o)}" ${cur.includes(o)?"checked":""}><span>${esc(o)}</span></label>`).join("")}</div>`;
+}
+function qcm(path,opts){
+  const cur=getP(draft,path);
+  return `<div class="opts">${opts.map((o,i)=>`<label class="opt"><input type="radio" name="${path}" data-k="${path}" value="${i}" ${String(cur)===String(i)?"checked":""}><span>${esc(o)}</span></label>`).join("")}</div>`;
+}
+const inp=(path,type="text",attrs="")=>`<input id="f-${path.replace(/\./g,"-")}" type="${type}" data-k="${path}" value="${esc(getP(draft,path)??"")}" ${attrs}>`;
+const area=(path,attrs="")=>`<textarea id="f-${path.replace(/\./g,"-")}" data-k="${path}" ${attrs}>${esc(getP(draft,path)??"")}</textarea>`;
+function sel(path,opts,ph="Choisir…"){
+  const cur=getP(draft,path);
+  return `<select id="f-${path.replace(/\./g,"-")}" data-k="${path}" data-rr="1"><option value="">${ph}</option>${opts.map(o=>`<option ${cur===o?"selected":""}>${esc(o)}</option>`).join("")}</select>`;
+}
+const field=(label,html,{req=false,hint=""}={})=>`<div class="field"><label class="${req?"req":""}">${label}</label>${hint?`<div class="hint">${hint}</div>`:""}${html}</div>`;
+
+/* ============ PARCOURS CANDIDAT ============ */
+function autresLangues(){
+  const l=draft.answers.langues||{};
+  return Object.keys(l).filter(k=>l[k]&&l[k]!=="Non"&&k!=="Français"&&k!=="Anglais");
+}
+const langLabel=(a,k)=>k==="Autre"?((a&&a.autreLangue)||"Autre langue"):k;
+const oralLang=(o,a,k)=>o?.langues?.[k]??(k==="Autre"?o?.langues?.[a?.autreLangue]:undefined);
+const STEPS=[
+ {t:"Vous",req:["answers.prenom","answers.nom","answers.tel","answers.naissance","answers.sexe","answers.nationalite","answers.permis","answers.adresse","answers.npa","answers.ville","answers.pays"],r:()=>`
+  <div class="grid2">
+   ${field("Prénom",inp("answers.prenom","text",'autocomplete="off"'),{req:1})}
+   ${field("Nom",inp("answers.nom","text",'autocomplete="off"'),{req:1})}
+   ${field("Téléphone",inp("answers.tel","tel",'inputmode="tel"'),{req:1})}
+   ${field("E-mail",inp("answers.email","email"))}
+  </div>
+  <div style="max-width:420px">${(()=>{const ag=age(draft.answers.naissance),bad=ag!=null&&ag<18,mx=new Date();mx.setFullYear(mx.getFullYear()-18);
+     return `<div class="field ${bad?"invalid":""}" id="naissance-field"><label class="req">Date de naissance</label><div class="hint">18 ans minimum</div>${inp("answers.naissance","date",'max="'+mx.toISOString().slice(0,10)+'"')}<div class="fielderr" ${bad?"":"hidden"}>Il faut avoir au moins 18 ans pour postuler.</div></div>`})()}</div>
+  <div class="panel stack" style="gap:16px">
+   <h3>Adresse de domicile</h3>
+   ${field("Rue et numéro",inp("answers.adresse","text",'autocomplete="off" placeholder="ex. Rue de Carouge 12"'),{req:1})}
+  <div class="grid2">
+   ${field("Code postal (NPA)",inp("answers.npa","text",'inputmode="numeric" autocomplete="off" placeholder="ex. 1205"'),{req:1})}
+   ${field("Ville",inp("answers.ville","text",'autocomplete="off" placeholder="ex. Genève"'),{req:1})}
+  </div>
+  ${field("Pays de domicile",radio("answers.pays",["Suisse","France","Autre"],{rerender:true}),{req:1})}
+  ${draft.answers.pays==="Autre"?field("Précisez le pays",inp("answers.paysAutre")):""}
+  </div>
+  ${field("Vous êtes",radio("answers.sexe",["Homme","Femme"],{rerender:true}),{req:1})}
+  <div class="grid2">
+   ${field("Nationalité",sel("answers.nationalite",NATIONS),{req:1})}
+   ${draft.answers.nationalite==="Autre"?field("Précisez la nationalité",inp("answers.nationaliteAutre")):"<div></div>"}
+  </div>
+  ${field("Permis de séjour / travail",radio("answers.permis",PERMIS,{rerender:true}),{req:1})}
+  ${avsVisible()?`<div style="max-width:420px">${field("Numéro AVS",inp("answers.avs","text",'inputmode="numeric" autocomplete="off" placeholder="756.1234.5678.97"'),{req:avsRequired(),hint:avsRequired()?"Sur votre carte d'assurance maladie ou carte AVS.":"Si vous avez déjà travaillé en Suisse."})}</div>`:""}
+  <div class="grid2">
+   ${field("Temps de trajet jusqu'au restaurant",radio("answers.trajet",["- de 15 min","15–30 min","30–45 min","+ de 45 min"]))}
+   ${field("Moyen de transport",radio("answers.transport",["TPG / train","Vélo / trottinette","Voiture / scooter","À pied"]))}
+  </div>`},
+ {t:"Disponibilités",req:["answers.dispo.taux","answers.dispo.creneaux","answers.dispo.weekend","answers.dispo.emploi","answers.dispo.libre","answers.dispo.vacances"],r:()=>`
+  ${field("Taux de travail souhaité",radio("answers.dispo.taux",["100 %","80 %","50–60 %","Extra / heures","Je suis flexible"]),{req:1})}
+  ${field("Jours disponibles",multi("answers.dispo.jours",JOURS))}
+  ${field("Créneaux possibles",radio("answers.dispo.creneaux",CRENEAUX),{req:1})}
+  ${field("Disponible le week-end ?",radio("answers.dispo.weekend",["Oui","Non"]),{req:1})}
+  ${field("Avez-vous un emploi en ce moment ?",radio("answers.dispo.emploi",["Oui, à plein temps","Oui, à temps partiel","Non"],{rerender:true}),{req:1})}
+  ${draft.answers.dispo?.emploi&&draft.answers.dispo.emploi!=="Non"?field("Délai de préavis",radio("answers.dispo.preavis",["Aucun","1 semaine","1 mois","2 mois","3 mois"]))+field("Garderiez-vous cet emploi en parallèle ?",radio("answers.dispo.parallele",["Oui","Non"])):""}
+  ${field("Quand pouvez-vous commencer ?",radio("answers.dispo.libre",["Tout de suite","Dans 1 à 2 semaines","Dans 1 mois","Plus tard"]),{req:1})}
+  ${field("Vacances dans les 6 prochains mois ?",radio("answers.dispo.vacances",["Oui, déjà prévues","Peut-être, pas encore fixées","Non"],{rerender:true}),{req:1})}
+  ${draft.answers.dispo?.vacances==="Oui, déjà prévues"?field("Dates des vacances",inp("answers.dispo.vacancesDates","text",'placeholder="ex. 15 au 30 juillet"')):""}
+  ${field("Avez-vous des contraintes d'horaires ?",area("answers.dispo.contraintes",'placeholder="Études, autre emploi, trajets… (facultatif)"'))}`},
+ {t:"Expérience",req:["answers.exp.duree","answers.exp.fastfood","answers.exp.caisse"],r:()=>`
+  ${field("Combien d'expérience avez-vous en restauration ?",radio("answers.exp.duree",EXP_DUREES),{req:1})}
+  ${field("Déjà travaillé dans un fast-food ?",radio("answers.exp.fastfood",["Oui","Non"]),{req:1})}
+  ${field("Déjà tenu une caisse enregistreuse ?",radio("answers.exp.caisse",["Oui","Non"]),{req:1})}
+  ${field("Déjà travaillé en cuisine (friteuse, préparation) ?",radio("answers.exp.cuisine",["Oui","Non"]))}
+  <div class="grid2">
+   ${field("Dernier employeur",inp("answers.exp.employeur"))}
+   ${field("Poste occupé",inp("answers.exp.poste"))}
+  </div>
+  ${field("Pourquoi avez-vous quitté (ou voulez quitter) ce poste ?",area("answers.exp.depart"))}
+  ${field("Formation hygiène (HACCP) ?",radio("answers.exp.haccp",["Oui, avec attestation","Oui, sans attestation","Non"]))}
+  ${field("Une référence que nous pouvons appeler",inp("answers.exp.reference","text",'placeholder="Nom, entreprise, téléphone"'))}`},
+ {t:"Langues",req:["answers.langues.Français"],r:()=>`
+  <p class="muted">Pour chaque langue, indiquez votre niveau. Laissez « Non » si vous ne la parlez pas. Vous ferez ensuite un petit test écrit et oral.</p>
+  <div class="panel" style="padding:8px 18px">
+   ${LANGS.map(l=>`<div class="langrow"><div class="qlabel ${l==="Français"?"req":""}">${l}</div>${radio("answers.langues."+l,["Non",...NIVEAUX],{rerender:l==="Autre"})}</div>`).join("")}
+  </div>
+  ${draft.answers.langues?.Autre&&draft.answers.langues.Autre!=="Non"?field("Quelle autre langue ?",inp("answers.autreLangue")):""}`},
+ {t:"Français",req:FR_Q.map((_,i)=>"answers.fr.q."+i).concat(["answers.fr.t1","answers.fr.t2"]),r:()=>`
+  <div class="panel"><h3 style="margin-bottom:6px">Choisissez la bonne réponse</h3>
+   ${FR_Q.map((q,i)=>`<div class="q"><div class="qlabel">${i+1}. ${esc(q.q)}</div>${qcm("answers.fr.q."+i,q.o)}</div>`).join("")}
+  </div>
+  <div class="field"><label class="req">Recopiez cette phrase en corrigeant les fautes</label>
+   <div class="quote">${esc(FR_FAUTE)}</div>${area("answers.fr.t1",'spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" style="min-height:90px"')}</div>
+  ${field("En 3 à 5 phrases : présentez-vous et dites pourquoi vous voulez travailler chez Chic Chicken.",area("answers.fr.t2",'spellcheck="false" autocomplete="off" autocorrect="off" style="min-height:160px"'),{req:1})}`},
+ {t:"English",req:EN_Q.map((_,i)=>"answers.en.q."+i),r:()=>`
+  <div class="panel"><h3 style="margin-bottom:6px">Choose the right answer</h3>
+   ${EN_Q.map((q,i)=>`<div class="q"><div class="qlabel">${i+1}. ${esc(q.q)}</div>${qcm("answers.en.q."+i,q.o)}</div>`).join("")}
+  </div>
+  ${field("Write 2 or 3 sentences in English: introduce yourself and say why you want this job.",area("answers.en.t1",'spellcheck="false" autocomplete="off" autocorrect="off"'),{hint:"Si vous ne parlez pas anglais, écrivez ce que vous pouvez ou laissez vide."})}`},
+ {t:"Autres langues",skip:()=>autresLangues().length===0,req:()=>autresLangues().map(l=>"answers.autres."+l),r:()=>`
+  <p class="muted">Vous avez indiqué parler d'autres langues. Pour chacune, traduisez cette phrase :</p>
+  <div class="quote">« Bonjour, bienvenue chez Chic Chicken. Qu'est-ce que je vous sers ? Sur place ou à emporter ? »</div>
+  ${autresLangues().map(l=>field(esc(langLabel(draft.answers,l)),area("answers.autres."+l,'spellcheck="false" autocomplete="off" style="min-height:90px"'),{req:1})).join("")}`},
+ {t:"Calcul caisse",skip:()=>draft.poste==="Aide-cuisine",req:CALC.map((_,i)=>"answers.calc.a."+i),r:()=>`
+  <div class="note"><b>Sans calculatrice ni téléphone.</b> Le temps est mesuré. Écrivez les montants en francs, par exemple 12.50.</div>
+  <div class="panel" style="padding:8px 22px">
+   ${CALC.map((q,i)=>`<div class="calcq"><div class="qlabel">${i+1}. ${esc(q.q)}</div><div class="money">${inp("answers.calc.a."+i,"text",'inputmode="decimal" autocomplete="off" placeholder="0.00"')}</div></div>`).join("")}
+  </div>`},
+ {t:"Test cuisine",skip:()=>draft.poste!=="Aide-cuisine",req:CUISINE.map((_,i)=>"answers.ktest."+i),r:()=>`
+  <div class="note"><b>Questions de cuisine et d'hygiène.</b> Une seule réponse par question.</div>
+  <div class="panel">${CUISINE.map((q,i)=>`<div class="q"><div class="qlabel">${i+1}. ${esc(q.q)}</div>${qcm("answers.ktest."+i,q.o)}</div>`).join("")}</div>`},
+ {t:"Situations",req:SITU.map((_,i)=>"answers.situ."+i),r:()=>`
+  <p class="muted">Que feriez-vous dans ces situations ? Une seule réponse par question.</p>
+  <div class="panel">${SITU.map((q,i)=>`<div class="q"><div class="qlabel">${i+1}. ${esc(q.q)}</div>${qcm("answers.situ."+i,q.o)}</div>`).join("")}</div>`},
+ {t:"Tenue & hygiène",req:()=>{const r=draft.answers.regles||{},q=["answers.regles.piercing","answers.regles.tatouage","answers.regles.cheveux","answers.regles.uniforme","answers.regles.ongles","answers.regles.bijoux"];
+   if(draft.answers.sexe==="Homme")q.push("answers.regles.barbe"); if(r.barbe==="Oui")q.push("answers.regles.barbeAction");
+   if(r.piercing==="Oui")q.push("answers.regles.piercingOk"); if(r.tatouage==="Oui")q.push("answers.regles.tatouageOk"); if(r.cheveux==="Oui")q.push("answers.regles.cheveuxOk"); return q},r:()=>{const r=draft.answers.regles||{};return `
+  <p class="muted">En cuisine et au comptoir, les règles d'hygiène sont les mêmes pour toute l'équipe.</p>
+  <div class="panel">
+   ${draft.answers.sexe==="Homme"?`<div class="rule">${field("Avez-vous une barbe ?",radio("answers.regles.barbe",["Oui","Non"],{rerender:true}),{req:1})}
+    ${r.barbe==="Oui"?field("Pour le service, la barbe doit être rasée ou portée courte avec un cache-barbe. Êtes-vous d'accord ?",radio("answers.regles.barbeAction",["Oui, je la rase","Oui, courte avec cache-barbe","Non"]),{req:1}):""}</div>`:""}
+   <div class="rule">${field("Avez-vous des piercings visibles ?",radio("answers.regles.piercing",["Oui","Non"],{rerender:true}),{req:1})}
+    ${r.piercing==="Oui"?field("Acceptez-vous de les enlever pendant le service ?",radio("answers.regles.piercingOk",["Oui","Non"]),{req:1}):""}</div>
+   <div class="rule">${field("Avez-vous des tatouages visibles (mains, bras, cou, visage) ?",radio("answers.regles.tatouage",["Oui","Non"],{rerender:true}),{req:1})}
+    ${r.tatouage==="Oui"?field("Acceptez-vous de les couvrir pendant le service (manches, bandeau) ?",radio("answers.regles.tatouageOk",["Oui","Non"]),{req:1}):""}</div>
+   <div class="rule">${field("Avez-vous les cheveux longs (sous les épaules) ?",radio("answers.regles.cheveux",["Oui","Non"],{rerender:true}),{req:1})}
+    ${r.cheveux==="Oui"?field("Acceptez-vous de les attacher sous la casquette ou un filet ?",radio("answers.regles.cheveuxOk",["Oui","Non"]),{req:1}):""}</div>
+   <div class="rule">
+    ${field("Porter l'uniforme et la casquette Chic Chicken fournis",radio("answers.regles.uniforme",["J'accepte","Je refuse"]),{req:1})}
+    ${field("Ongles courts, sans vernis ni faux ongles",radio("answers.regles.ongles",["J'accepte","Je refuse"]),{req:1})}
+    ${field("Pas de bague, montre ni bracelet pendant le service",radio("answers.regles.bijoux",["J'accepte","Je refuse"]),{req:1})}
+   </div>
+  </div>`}},
+ {t:"Motivation",req:["answers.motiv.duree","answers.motiv.source"],r:()=>`
+  ${field("Combien de temps pensez-vous rester chez nous ?",radio("answers.motiv.duree",["Moins de 6 mois","6 mois à 1 an","1 à 2 ans","Plus de 2 ans"]),{req:1})}
+  ${field("Comment avez-vous connu cette offre ?",radio("answers.motiv.source",["Annonce en ligne","Affiche au restaurant","Bouche-à-oreille","Réseaux sociaux","Candidature spontanée"]),{req:1})}
+  ${field("Qu'est-ce qui est le plus important pour vous dans un travail ?",area("answers.motiv.important",'style="min-height:90px"'))}
+  ${field("Connaissez-vous Chic Chicken ? Quel est votre produit préféré ?",inp("answers.motiv.produit"))}
+  ${field("Une question pour nous ?",area("answers.motiv.question",'style="min-height:80px"'))}`},
+ {t:"Signature",req:["answers.attest","answers.signature"],r:()=>`
+  <p class="muted">Dernière étape. Vous pouvez encore relire vos réponses avec le bouton Retour.</p>
+  <label class="check"><input type="checkbox" id="attest" data-k="answers.attest" ${draft.answers.attest?"checked":""}><span>Je certifie que mes réponses sont exactes et que j'ai répondu seul·e, sans aide. <span class="req"></span></span></label>
+  <div class="field"><label class="req">Signez avec le doigt dans le cadre</label>
+   <div class="sigwrap"><canvas id="sig" aria-label="Zone de signature"></canvas></div>
+   <div class="row between" style="max-width:640px"><span class="hint">${esc(((draft.answers.prenom||"")+" "+(draft.answers.nom||"")).trim())} · ${new Date().toLocaleDateString("fr-CH")}</span><button class="btn sm" data-a="sigClear">Effacer</button></div></div>`},
+];
+function exportSig(cv){const o=document.createElement("canvas");o.width=600;o.height=200;const x=o.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,600,200);x.drawImage(cv,0,0,600,200);return o.toDataURL("image/png")}
+window.addEventListener("resize",()=>{if(view==="cand"&&$("#sig"))sigInit()});
+function sigInit(){
+  const cv=$("#sig");if(!cv)return;const r=cv.getBoundingClientRect();if(!r.width)return;const dpr=window.devicePixelRatio||1;
+  cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);const ctx=cv.getContext("2d");ctx.scale(dpr,dpr);
+  ctx.lineWidth=2.6;ctx.lineCap="round";ctx.lineJoin="round";ctx.strokeStyle="#111";
+  if(draft?.answers?.signature){const img=new Image();img.onload=()=>ctx.drawImage(img,0,0,r.width,r.height);img.src=draft.answers.signature}
+  let drawing=false,last=null;const pos=e=>{const b=cv.getBoundingClientRect();return{x:e.clientX-b.left,y:e.clientY-b.top}};
+  cv.onpointerdown=e=>{drawing=true;try{cv.setPointerCapture(e.pointerId)}catch(_){}last=pos(e);ctx.beginPath();ctx.arc(last.x,last.y,1.2,0,7);ctx.fillStyle="#111";ctx.fill();e.preventDefault()};
+  cv.onpointermove=e=>{if(!drawing)return;const p=pos(e);ctx.beginPath();ctx.moveTo(last.x,last.y);ctx.lineTo(p.x,p.y);ctx.stroke();last=p;e.preventDefault()};
+  cv.onpointerup=cv.onpointercancel=cv.onpointerleave=()=>{if(!drawing)return;drawing=false;if(draft)draft.answers.signature=exportSig(cv)};
+}
+function avsRequired(){const a=draft?.answers||{};return a.nationalite==="Suisse"||a.permis==="Nationalité suisse"}
+function avsVisible(){return avsRequired()||draft?.answers?.permis==="Permis G (frontalier)"}
+const avsOk=v=>/^756\d{10}$/.test(String(v||"").replace(/[\s.]/g,""));
+const visibleSteps=()=>STEPS.filter(s=>!(s.skip&&s.skip()));
+
+function renderCandidat(){
+  const vs=visibleSteps(), s=vs[step];
+  if(s.t==="Calcul caisse"&&!draft.answers.calc?.start){setP(draft,"answers.calc.start",Date.now())}
+  return `${topBar(`<button class="btn sm" data-a="quit">Quitter</button>`)}
+  <div class="wrap stack">
+   <div><div class="eyebrow">Étape ${step+1} sur ${vs.length}</div>
+    <div class="progress">${vs.map((_,i)=>`<i class="${i<=step?"on":""}"></i>`).join("")}</div>
+    <h1 style="margin-top:12px">${esc(s.t)}</h1></div>
+   ${errorMsg?`<div class="err" role="alert">${esc(errorMsg)}</div>`:""}
+   ${s.r()}
+   <div class="foot">
+    <button class="btn" data-a="prev" ${step===0?"disabled":""}>Retour</button>
+    <button class="btn primary" data-a="next">${step===vs.length-1?"Terminer":"Continuer"}</button>
+   </div>
+  </div>`;
+}
+function validateStep(){
+  const s=visibleSteps()[step];
+  const req=typeof s.req==="function"?s.req():s.req;
+  const miss=req.filter(p=>{const v=getP(draft,p);return v==null||(typeof v==="string"&&v.trim()==="")||(Array.isArray(v)&&!v.length)});
+  if(s.t==="Disponibilités"&&!(draft.answers.dispo?.jours||[]).length)miss.push("jours");
+  if(miss.length){errorMsg="Merci de répondre à toutes les questions marquées d'une étoile.";return false}
+  if(s.t==="Vous"){const ag=age(draft.answers.naissance);if(ag!=null&&ag<18){errorMsg="Il faut avoir au moins 18 ans pour postuler.";return false}}
+  if(s.t==="Vous"){const v=draft.answers.avs;if(avsVisible()&&(avsRequired()||(v||"").trim())&&!avsOk(v)){errorMsg="Le numéro AVS doit commencer par 756 et contenir 13 chiffres (ex. 756.1234.5678.97).";return false}
+   if(!avsVisible())delete draft.answers.avs;}
+  if(s.t==="Vous"){const a=age(draft.answers.naissance);if(a!=null&&a<18){errorMsg="Il faut avoir au moins 18 ans pour postuler.";return false}if(a==null||a>80){errorMsg="Vérifiez la date de naissance.";return false}}
+  errorMsg="";return true;
+}
+
+/* ============ ÉCRANS ============ */
+function renderHome(){
+  return `${topBar(`<button class="btn sm" data-a="openRH">Espace RH</button>`)}
+  <div class="wrap">
+   ${dbNote?`<div class="banner">${esc(dbNote)}</div>`:""}
+   <div class="hero"><div class="eyebrow">Entretiens d'embauche · 4 restaurants</div>
+    <h1 style="margin-top:8px;max-width:20ch">Choisir la bonne personne, avec les mêmes critères pour tous.</h1>
+    <p class="muted" style="margin-top:12px;max-width:62ch">Le candidat répond seul sur la tablette (environ 20 minutes). Le responsable note ensuite l'oral. Les scores ne sont visibles que dans l'espace RH, protégé par un code.</p></div>
+   <div class="home-cards">
+    <button class="home-card feature" data-a="newInterview"><span class="eyebrow" style="color:inherit;opacity:.7">Commencer</span><h2>Nouvel entretien</h2><p class="muted">Préparer la tablette pour un candidat.</p></button>
+    <button class="home-card" data-a="openRH"><span class="eyebrow">Code requis</span><h2>Espace RH</h2><p class="muted">${rhUnlocked&&loaded?candidats.length+" candidat"+(candidats.length>1?"s":"")+" enregistré"+(candidats.length>1?"s":""):"Scores, comparaison, décisions."}</p></button>
+   </div>
+  </div>`;
+}
+function renderSetup(){
+  return `${topBar(`<button class="btn sm" data-a="home">Annuler</button>`)}
+  <div class="wrap stack"><div><div class="eyebrow">Responsable</div><h1 style="margin-top:8px">Préparer l'entretien</h1></div>
+   ${errorMsg?`<div class="err" role="alert">${esc(errorMsg)}</div>`:""}
+   ${field("Restaurant",radio("resto",RESTOS),{req:1})}
+   ${field("Poste",radio("poste",POSTES),{req:1})}
+   ${field("Responsable qui mène l'entretien",inp("responsable"),{req:1})}
+   <div class="foot"><span></span><button class="btn primary" data-a="startCand">Remettre la tablette au candidat</button></div>
+  </div>`;
+}
+function renderIntro(){
+  return `${topBar(`<button class="btn sm" data-a="quit">Quitter</button>`)}
+  <div class="wrap stack" style="padding-top:24px">
+   <div>${logoImg(96)}</div>
+   <div class="eyebrow">Bienvenue</div>
+   <h1 style="max-width:18ch">Merci d'être venu·e chez Chic Chicken.</h1>
+   <p style="max-width:60ch;font-size:18px">Vous allez répondre à quelques questions : vos disponibilités, votre expérience, un petit test de français, d'anglais et ${draft?.poste==="Aide-cuisine"?"de cuisine":"de calcul"}, puis les règles d'hygiène. Cela prend environ 20 minutes.</p>
+   <div class="note"><b>Répondez seul·e, sans téléphone ni calculatrice.</b> Il n'y a pas de piège : répondez honnêtement.</div>
+   <div class="stack" style="gap:10px"><h3>Protection de vos données</h3>
+    ${errorMsg?`<div class="err" role="alert">${esc(errorMsg)}</div>`:""}
+    <label class="check"><input type="checkbox" id="consent" data-k="answers.consent" ${draft.answers.consent?"checked":""}><span><b>J'accepte</b> que Chic Chicken Suisse SA utilise mes réponses et mes documents uniquement pour ce recrutement. Ils sont conservés au maximum 6 mois après ma candidature (sauf si je suis engagé·e), puis supprimés. <span class="req"></span></span></label>
+    <label class="check"><input type="checkbox" id="consent-vivier" data-k="answers.consentVivier" ${draft.answers.consentVivier?"checked":""}><span>J'accepte d'être recontacté·e plus tard si un autre poste se libère (facultatif).</span></label>
+   </div>
+   <div class="foot"><span></span><button class="btn gold" data-a="begin">Commencer</button></div>
+  </div>`;
+}
+function renderMerci(){
+  return `${topBar()}
+  <div class="wrap stack" style="padding-top:40px;text-align:center;align-items:center">
+   <div class="mark" style="width:64px;height:64px;font-size:22px">✓</div>
+   <h1>Merci, c'est terminé !</h1>
+   <p style="font-size:18px;max-width:46ch">Rendez maintenant la tablette au responsable. Il va continuer l'entretien avec vous à l'oral.</p>
+   <div class="row" style="justify-content:center;margin-top:24px"><button class="btn primary" data-a="toOral">Responsable : évaluation orale</button><button class="btn" data-a="home">Faire l'oral plus tard</button></div>
+   <p class="hint">L'oral peut aussi être noté plus tard depuis la fiche du candidat, dans l'espace RH.</p>
+  </div>`;
+}
+function renderOral(){
+  const c=candidats.find(x=>x.id===currentId)||{answers:{}}, a=c.answers||{};
+  const langs=Object.keys(a.langues||{}).filter(k=>a.langues[k]&&a.langues[k]!=="Non");
+  const rate=(path,lab,hint="")=>{const cur=getP(oralDraft,path);return `<div class="ratingrow"><div><div class="qlabel">${esc(lab)}</div>${hint?`<div class="hint">${esc(hint)}</div>`:""}</div>
+   <div class="rating">${[1,2,3,4,5].map(n=>`<label class="chip"><input type="radio" name="o-${esc(path)}" data-o="${esc(path)}" value="${n}" ${String(cur)===String(n)?"checked":""}><span>${n}</span></label>`).join("")}</div></div>`};
+  return `${topBar(`<button class="btn sm" data-a="${oralFromRH?"backDetail":"home"}">Fermer</button>`)}
+  <div class="wrap stack">
+   <div><div class="eyebrow">Responsable · face au candidat</div><h1 style="margin-top:8px">Entretien oral : ${esc(nomComplet(c))}</h1>
+    <p class="muted" style="margin-top:6px">Notez de 1 (insuffisant) à 5 (excellent). Le candidat ne voit pas les notes.</p></div>
+   <div class="oralhelp"><b>Questions à poser à voix haute</b><ul>
+    <li>Présentez-vous en quelques phrases.</li><li>Racontez une fois où un client était mécontent. Qu'avez-vous fait ?</li>
+    <li>Pourquoi Chic Chicken ? Qu'est-ce que vous aimez manger chez nous ?</li>
+    <li>Jeu de rôle : « Je prends un menu, on mange sur place. » Faites l'encaissement à voix haute.</li></ul></div>
+   ${field("Ponctualité : la personne est arrivée…",`<div class="chips">${ARRIVEE.map(([l])=>`<label class="chip"><input type="radio" name="o-arrivee" data-o="arrivee" value="${esc(l)}" ${oralDraft.arrivee===l?"checked":""}><span>${esc(l)}</span></label>`).join("")}</div>`)}
+   <div><h2>Comportement et caractère</h2><p class="muted small" style="margin-top:4px">Notez ce que vous avez observé pendant l'entretien.</p></div>
+   <div class="panel" style="padding:8px 22px">${ORAL.map(([k,l,h])=>rate(k,l,h)).join("")}</div>
+   ${field("En quelques mots, son caractère",`<div class="chips">${CARACTERE.map(t=>`<label class="chip"><input type="checkbox" data-o="caractere" data-multi="1" value="${esc(t)}" ${(oralDraft.caractere||[]).includes(t)?"checked":""}><span>${esc(t)}</span></label>`).join("")}</div>`,{hint:"Plusieurs choix possibles"})}
+   <div><h2>Langues à l'oral</h2><p class="muted small" style="margin-top:4px">Demandez de se présenter et de répondre à une question de client dans chaque langue déclarée.</p></div>
+   <div class="panel" style="padding:8px 22px">${langs.length?langs.filter(l=>l!=="Français").map(l=>rate("langues."+l,langLabel(a,l),"Déclaré : "+(a.langues[l]||""))).join("")||'<p class="muted" style="padding-block:12px">Seul le français est déclaré.</p>':'<p class="muted" style="padding-block:12px">Aucune langue déclarée.</p>'}</div>
+   ${field("Recommandation",`<div class="chips">${["Oui","Peut-être","Non"].map(o=>`<label class="chip"><input type="radio" name="o-reco" data-o="reco" value="${o}" ${oralDraft.reco===o?"checked":""}><span>${o}</span></label>`).join("")}</div>`)}
+   ${field("Commentaire du responsable",`<textarea id="o-comment" data-o="commentaire">${esc(oralDraft.commentaire||"")}</textarea>`)}
+   <div class="foot"><span></span><button class="btn primary" data-a="saveOral">Enregistrer l'évaluation</button></div>
+  </div>`;
+}
+
+/* ============ RH ============ */
+function filtered(){
+  let L=candidats.slice();
+  if(filt.resto)L=L.filter(c=>c.resto===filt.resto);
+  if(filt.statut)L=L.filter(c=>(c.statut||"nouveau")===filt.statut);
+  if(filt.q){const q=filt.q.toLowerCase();L=L.filter(c=>(nomComplet(c)+" "+(c.poste||"")+" "+(c.answers?.tel||"")).toLowerCase().includes(q))}
+  L.sort((a,b)=>filt.sort==="score"?scoreOf(b).total-scoreOf(a).total:(b.createdAt||0)-(a.createdAt||0));
+  return L;
+}
+function renderRH(){
+  const L=filtered();
+  const all=candidats.map(scoreOf);
+  const avg=all.length?Math.round(all.reduce((s,x)=>s+x.total,0)/all.length):0;
+  const retenus=candidats.filter(c=>c.statut==="retenu").length;
+  const aTraiter=candidats.filter(c=>!c.statut||c.statut==="nouveau").length;
+  return `${topBar(`<button class="btn sm" data-a="exportCSV" ${downloads?"":"hidden"}>Exporter CSV</button><button class="btn sm" data-a="settings">Code</button><button class="btn sm" data-a="lock">Verrouiller</button>`)}
+  <div class="wide">
+   ${dbNote?`<div class="banner">${esc(dbNote)}</div>`:""}
+   ${rhTabs("rh")}
+   <div class="section-title"><h1>Candidats</h1><button class="btn sm gold" data-a="newInterview">Nouvel entretien</button></div>
+   <div class="stats">
+    <div class="stat"><span class="eyebrow">Candidats</span><b>${candidats.length}</b></div>
+    <div class="stat"><span class="eyebrow">À traiter</span><b>${aTraiter}</b></div>
+    <div class="stat"><span class="eyebrow">Score moyen</span><b>${avg}</b></div>
+    <div class="stat"><span class="eyebrow">Retenus</span><b>${retenus}</b></div>
+   </div>
+   <div class="toolbar">
+    <input id="rh-q" type="text" placeholder="Rechercher un nom, un poste…" value="${esc(filt.q)}" data-f="q">
+    <select id="rh-resto" data-f="resto"><option value="">Tous les restaurants</option>${RESTOS.map(r=>`<option ${filt.resto===r?"selected":""}>${r}</option>`).join("")}</select>
+    <select id="rh-statut" data-f="statut"><option value="">Tous les statuts</option>${STATUTS.map(s=>`<option value="${s[0]}" ${filt.statut===s[0]?"selected":""}>${s[1]}</option>`).join("")}</select>
+    <select id="rh-sort" data-f="sort"><option value="score" ${filt.sort==="score"?"selected":""}>Meilleur score</option><option value="date" ${filt.sort==="date"?"selected":""}>Plus récent</option></select>
+   </div>
+   ${!loaded?`<div class="panel empty">Chargement des candidats…</div>`:!L.length?`<div class="panel empty"><h3 style="color:var(--ink)">${candidats.length?"Aucun candidat avec ces filtres":"Aucun entretien pour l'instant"}</h3><p style="margin-top:6px">${candidats.length?"Changez les filtres.":"Lancez un « Nouvel entretien » : le candidat apparaîtra ici avec son score."}</p></div>`:`
+   <div class="tablewrap"><table><thead><tr><th>Candidat</th><th>Poste</th><th>Restaurant</th><th>Date</th><th>Score</th><th>Alertes</th><th>Statut</th></tr></thead><tbody>
+    ${L.map(c=>{const s=scoreOf(c),al=alertsOf(c),st=statutInfo(c.statut),bad=al.filter(x=>x[0]==="bad").length,warn=al.length-bad;
+     return `<tr data-a="open" data-id="${c.id}"><td><b>${esc(nomComplet(c))}</b><div class="muted small">${esc(c.answers?.tel||"")}</div></td><td>${esc(c.poste||"")}</td><td>${esc(c.resto||"")}</td><td class="num">${fmtDate(c.createdAt)}</td>
+     <td><span class="score">${s.total}<small>/100</small></span>${s.pending?`<div class="muted small">provisoire</div>`:""}</td>
+     <td><div class="alerts">${bad?`<span class="pill bad">${bad} bloquant${bad>1?"s":""}</span>`:""}${warn?`<span class="pill warn">${warn}</span>`:""}${!al.length?`<span class="pill ok">RAS</span>`:""}</div></td>
+     <td><span class="pill ${st[2]}"><span class="dot"></span>${st[1]}</span>${c.essai?.date?`<div class="muted small" style="margin-top:4px">Essai ${esc(fmtLong(c.essai.date))}</div>`:""}</td></tr>`}).join("")}
+   </tbody></table></div>`}
+  </div>`;
+}
+const rhTabs=active=>`<div class="tabs" role="tablist"><button role="tab" class="tab ${active==="rh"?"on":""}" data-a="tabListe">Candidats</button><button role="tab" class="tab ${active==="planning"?"on":""}" data-a="tabPlanning">Planning des essais</button><button role="tab" class="tab ${active==="vivier"?"on":""}" data-a="tabVivier">Vivier (${candidats.filter(c=>c.statut==="vivier").length})</button></div>`;
+const isCuisine=c=>c.poste==="Aide-cuisine";
+const normTel=t=>String(t||"").replace(/\D/g,"").slice(-9);
+const idKey=b=>((b.prenom||"")+(b.nom||"")).toLowerCase().normalize("NFD").replace(/[̀-ͯ\s-]/g,"")+"|"+(b.naissance||"");
+function dupsOf(c){const a=c.answers||{},t=normTel(a.tel),em=(a.email||"").trim().toLowerCase(),k=idKey(a);
+  return candidats.filter(x=>{if(x.id===c.id)return false;const b=x.answers||{};return (t.length>=9&&normTel(b.tel)===t)||(em&&(b.email||"").trim().toLowerCase()===em)||(a.naissance&&idKey(b)===k)}).sort((p,q)=>(q.createdAt||0)-(p.createdAt||0))}
+const expireOf=c=>c.statut==="retenu"?null:(c.keepFrom||c.createdAt||Date.now())+KEEP_DAYS*864e5;
+let serverLoaded=false, lastPurge=0;
+async function purgeExpired(){
+  if(!db||!serverLoaded||!rhUnlocked||Date.now()-lastPurge<36e5)return; lastPurge=Date.now();
+  const now=Date.now(), ex=candidats.filter(c=>{const e=expireOf(c);return e&&e<now&&(!(c.docs||[]).length||assets)});
+  let n=0;for(const c of ex){try{for(const d of (c.docs||[])){try{await assets.delete(d.id)}catch(e){}}await db.doc("candidats/"+c.id).delete();n++}catch(e){}}
+  if(n)toast(n+" dossier"+(n>1?"s":"")+" de plus de 6 mois supprimé"+(n>1?"s":""));
+}
+function dupPanel(c){const dp=dupsOf(c);if(!dp.length)return "";
+  return `<div class="panel"><div class="section-title"><h2>Déjà postulé</h2><span class="pill warn">${dp.length} autre${dp.length>1?"s":""} candidature${dp.length>1?"s":""}</span></div>
+   <p class="muted small" style="margin-bottom:12px">Même téléphone, e-mail ou nom + date de naissance.</p>
+   <div class="later">${dp.map(x=>{const st=statutInfo(x.statut);return `<button class="lrow" data-a="open" data-id="${x.id}"><span class="num">${fmtDate(x.createdAt)}</span><b>${esc(x.poste||"")} · ${esc(x.resto||"")}</b><span class="row" style="gap:6px"><span class="pill ${st[2]}">${st[1]}</span><span class="num">${scoreOf(x).total}/100</span></span></button>`}).join("")}</div></div>`}
+function embauchePanel(c){
+  if(c.statut!=="retenu")return "";
+  const em=c.embauche||{},it=em.items||{},list=EMB.filter(x=>!x[3]||x[3](c)),done=list.filter(x=>it[x[0]]).length;
+  const restos=RESTOS.filter(r=>r!=="Pas encore défini"),rDef=em.resto||c.essai?.resto||(restos.includes(c.resto)?c.resto:"");
+  return `<div class="panel"><div class="section-title"><h2>Checklist d'embauche</h2><span class="pill ${done===list.length?"ok":"warn"}">${done}/${list.length}</span></div>
+   <div class="track" style="margin-bottom:18px"><div class="fill" style="width:${list.length?done/list.length*100:0}%;${done===list.length?"background:var(--ok)":""}"></div></div>
+   <div class="essai-form" style="margin-bottom:18px">
+    <div class="field"><label for="emb-debut">Date de début</label><input id="emb-debut" type="date" value="${esc(em.debut||"")}" data-a-change="embField" data-key="debut"></div>
+    <div class="field"><label for="emb-resto">Restaurant</label><select id="emb-resto" data-a-change="embField" data-key="resto"><option value="">Choisir…</option>${restos.map(r=>`<option ${rDef===r?"selected":""}>${r}</option>`).join("")}</select></div>
+    <div class="field"><label for="emb-taux">Taux / contrat</label><input id="emb-taux" type="text" placeholder="ex. 80 %, CDI" value="${esc(em.taux||"")}" data-a-change="embField" data-key="taux"></div>
+   </div>
+   <div class="checklist">${list.map(x=>{const hasDoc=x[2]&&(c.docs||[]).some(d=>d.label===x[2]);return `<label class="check"><input type="checkbox" data-a-change="embItem" data-key="${x[0]}" ${it[x[0]]?"checked":""}><span>${x[1]}${hasDoc?' <span class="pill ok">document joint</span>':""}${x[0]==="avs"&&c.answers?.avs?` <span class="muted num">${esc(c.answers.avs)}</span>`:""}</span></label>`}).join("")}</div>
+  </div>`;
+}
+function renderVivier(){
+  const L=candidats.filter(c=>c.statut==="vivier"&&(!filt.vresto||c.resto===filt.vresto)&&(!filt.poste||c.poste===filt.poste)).sort((a,b)=>scoreOf(b).total-scoreOf(a).total);
+  return `${topBar(`<button class="btn sm" data-a="settings">Code</button><button class="btn sm" data-a="lock">Verrouiller</button>`)}
+  <div class="wide">
+   ${rhTabs("vivier")}
+   <div class="section-title" style="flex-wrap:wrap"><div><h1>Vivier</h1><p class="muted" style="margin-top:4px;max-width:60ch">Les bons profils gardés pour plus tard. Mettez un candidat en statut « Vivier » depuis sa fiche, puis rappelez-le quand un resto cherche quelqu'un.</p></div>
+    <div class="row"><select id="vv-resto" data-f="vresto" class="fsel"><option value="">Tous les restaurants</option>${RESTOS.map(r=>`<option ${filt.vresto===r?"selected":""}>${r}</option>`).join("")}</select>
+     <select id="vv-poste" data-f="poste" class="fsel"><option value="">Tous les postes</option>${POSTES.map(p=>`<option ${filt.poste===p?"selected":""}>${p}</option>`).join("")}</select></div></div>
+   ${!L.length?`<div class="panel empty"><h3 style="color:var(--ink)">Le vivier est vide</h3><p style="margin-top:6px">Ouvrez la fiche d'un bon candidat non retenu et choisissez le statut « Vivier ».</p></div>`:`
+   <div class="tablewrap"><table><thead><tr><th>Candidat</th><th>Poste</th><th>Langues</th><th>Dispo</th><th>Score</th><th>Gardé jusqu'au</th><th></th></tr></thead><tbody>
+    ${L.map(c=>{const a=c.answers||{},d=a.dispo||{},s=scoreOf(c),lg=Object.entries(a.langues||{}).filter(([,v])=>v&&v!=="Non").map(([l])=>l==="Autre"?(a.autreLangue||"Autre"):l);
+     return `<tr data-a="open" data-id="${c.id}"><td><b>${esc(nomComplet(c))}</b><div class="muted small">${esc(a.tel||"")}</div></td><td>${esc(c.poste||"")}<div class="muted small">${esc(c.resto||"")}</div></td>
+     <td class="small">${esc(lg.join(", "))}</td><td class="small">${d.weekend==="Non"?"Pas le week-end":"Week-end OK"}<div class="muted">${esc(Array.isArray(d.creneaux)?d.creneaux.join(", "):d.creneaux||"")}${d.taux?" · "+esc(d.taux):""}</div></td>
+     <td><span class="score">${s.total}<small>/100</small></span></td><td class="num small">${fmtDate(expireOf(c))}</td>
+     <td><div class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn sm gold" data-a="rappeler" data-id="${c.id}">Rappeler</button><button class="btn sm" data-a="prolonger" data-id="${c.id}">+6 mois</button></div></td></tr>`}).join("")}
+   </tbody></table></div>`}
+  </div>`;
+}
+function essaiPanel(c){
+  const e=c.essai||{}, restos=RESTOS.filter(r=>r!=="Pas encore défini"), rDef=e.resto||(restos.includes(c.resto)?c.resto:restos[0]);
+  const res=RESULTATS.find(r=>r[0]===(e.resultat||"prevu"));
+  return `<div class="panel"><div class="section-title"><h2>Jour d'essai</h2>${e.date?`<span class="pill ${res[2]}">${esc(fmtLong(e.date))} · ${esc(e.debut||"")}${e.fin?"–"+esc(e.fin):""} · ${res[1]}</span>`:`<span class="muted small">Pas encore planifié</span>`}</div>
+   <div class="essai-form">
+    <div class="field"><label for="es-date">Date</label><input id="es-date" type="date" min="${isoDay(new Date(Date.now()-30*864e5))}" value="${esc(e.date||"")}"></div>
+    <div class="field"><label for="es-debut">Début</label><input id="es-debut" type="time" value="${esc(e.debut||"11:00")}"></div>
+    <div class="field"><label for="es-fin">Fin</label><input id="es-fin" type="time" value="${esc(e.fin||"15:00")}"></div>
+    <div class="field"><label for="es-resto">Restaurant</label><select id="es-resto">${restos.map(r=>`<option ${rDef===r?"selected":""}>${r}</option>`).join("")}</select></div>
+    <div class="field"><label for="es-resp">Responsable</label><input id="es-resp" type="text" value="${esc(e.responsable||c.responsable||"")}"></div>
+    <div class="field"><label for="es-note">Remarque pour le candidat</label><input id="es-note" type="text" placeholder="ex. pantalon noir, chaussures fermées" value="${esc(e.note||"")}"></div>
+   </div>
+   ${e.date?`<div class="field" style="margin-top:16px"><label>Résultat de l'essai</label><div class="chips">${RESULTATS.map(([k,l])=>`<label class="chip"><input type="radio" name="es-res" value="${k}" ${(e.resultat||"prevu")===k?"checked":""}><span>${l}</span></label>`).join("")}</div></div>`:""}
+   <div class="row" style="margin-top:16px"><button class="btn sm primary" data-a="saveEssai">${e.date?"Enregistrer":"Planifier l'essai"}</button>${e.date?`<button class="btn sm danger" data-a="delEssai">Annuler l'essai</button>`:""}</div>
+  </div>`;
+}
+function renderPlanning(){
+  const days=[...Array(7)].map((_,i)=>{const d=new Date(weekStart);d.setDate(d.getDate()+i);return d});
+  const today=isoDay(new Date());
+  const items=candidats.filter(c=>c.essai?.date&&(!filt.presto||c.essai.resto===filt.presto));
+  const end=days[6], label=days[0].toLocaleDateString("fr-CH",{day:"numeric",month:"long"})+" – "+end.toLocaleDateString("fr-CH",{day:"numeric",month:"long",year:"numeric"});
+  const weekCount=items.filter(c=>c.essai.date>=isoDay(days[0])&&c.essai.date<=isoDay(end)).length;
+  const upcoming=items.filter(c=>c.essai.date>isoDay(end)).sort((a,b)=>(a.essai.date+a.essai.debut).localeCompare(b.essai.date+b.essai.debut)).slice(0,8);
+  const card=c=>{const e=c.essai,res=RESULTATS.find(r=>r[0]===(e.resultat||"prevu")),s=scoreOf(c);
+    return `<button class="ecard ${res[0]}" data-a="open" data-id="${c.id}"><span class="num etime">${esc(e.debut||"")}${e.fin?"–"+esc(e.fin):""}</span><b>${esc(nomComplet(c))}</b><span class="muted small">${esc(e.resto||"")} · ${esc(c.poste||"")}</span><span class="muted small">Avec ${esc(e.responsable||"—")}</span><span class="row" style="gap:6px"><span class="pill ${res[2]}">${res[1]}</span><span class="pill neutral num">${s.total}/100</span></span></button>`};
+  return `${topBar(`<button class="btn sm" data-a="settings">Code</button><button class="btn sm" data-a="lock">Verrouiller</button>`)}
+  <div class="wide">
+   ${rhTabs("planning")}
+   <div class="section-title" style="flex-wrap:wrap"><div><h1>Planning des essais</h1><p class="muted" style="margin-top:4px">${esc(label)} · ${weekCount} essai${weekCount>1?"s":""}</p></div>
+    <div class="row"><select id="pl-resto" data-f="presto" style="width:auto;min-height:42px;font-size:15px;padding:8px 12px"><option value="">Tous les restaurants</option>${RESTOS.filter(r=>r!=="Pas encore défini").map(r=>`<option ${filt.presto===r?"selected":""}>${r}</option>`).join("")}</select>
+     <button class="btn sm" data-a="weekPrev" aria-label="Semaine précédente">←</button><button class="btn sm" data-a="weekToday">Cette semaine</button><button class="btn sm" data-a="weekNext" aria-label="Semaine suivante">→</button></div></div>
+   <div class="week">${days.map(d=>{const k=isoDay(d),list=items.filter(c=>c.essai.date===k).sort((a,b)=>(a.essai.debut||"").localeCompare(b.essai.debut||""));
+     return `<div class="day ${k===today?"today":""} ${list.length?"":"emptyday"}"><div class="dayhead"><span>${d.toLocaleDateString("fr-CH",{weekday:"short"})}</span><b class="num">${d.getDate()}</b></div>${list.map(card).join("")||`<span class="muted small dayempty">Aucun essai</span>`}</div>`}).join("")}</div>
+   ${upcoming.length?`<h2 style="margin:28px 0 12px">Plus tard</h2><div class="later">${upcoming.map(c=>`<button class="lrow" data-a="open" data-id="${c.id}"><span class="num">${esc(fmtLong(c.essai.date))} · ${esc(c.essai.debut||"")}</span><b>${esc(nomComplet(c))}</b><span class="muted">${esc(c.essai.resto||"")}</span></button>`).join("")}</div>`:""}
+   ${!items.length?`<div class="panel empty" style="margin-top:16px"><h3 style="color:var(--ink)">Aucun jour d'essai planifié</h3><p style="margin-top:6px">Ouvrez la fiche d'un candidat et remplissez le bloc « Jour d'essai » : il apparaîtra ici.</p></div>`:""}
+  </div>`;
+}
+function ansQcm(list,path,a){
+  return `<div class="ans">${list.map((q,i)=>{const v=getP(a,path+"."+i),ok=String(v)===String(q.a);return `<div class="ansline"><span class="mk ${ok?"y":"n"}">${ok?"✓":"✕"}</span><div>${esc(q.q)}<div class="muted small">${v!=null?esc(q.o[v]):"Pas de réponse"}${ok?"":" · bonne réponse : "+esc(q.o[q.a])}</div></div></div>`}).join("")}</div>`;
+}
+const kv=rows=>`<dl class="kv">${rows.filter(r=>r[1]!==undefined).map(([k,v])=>`<dt>${k}</dt><dd>${v===""||v==null?"—":v}</dd>`).join("")}</dl>`;
+function renderDetail(){
+  const c=candidats.find(x=>x.id===currentId);
+  if(!c)return `${topBar(`<button class="btn sm" data-a="backRH">Retour</button>`)}<div class="wrap empty">Candidat introuvable.</div>`;
+  const a=c.answers||{}, s=scoreOf(c), al=alertsOf(c), d=a.dispo||{}, e=a.exp||{}, r=a.regles||{}, o=c.oral||{};
+  const calcTime=a.calc?.start&&a.calc?.end?Math.round((a.calc.end-a.calc.start)/1000):null;
+  const langs=Object.entries(a.langues||{}).filter(([,v])=>v&&v!=="Non");
+  return `${topBar(`<button class="btn sm" data-a="backRH">Tous les candidats</button>`)}
+  <div class="wide stack">
+   <div class="panel"><div class="detail-head">
+    <div class="stack" style="gap:12px">
+     <div><div class="eyebrow">${esc(c.poste||"")} · ${esc(c.resto||"")} · ${fmtDate(c.createdAt)} · entretien : ${esc(c.responsable||"—")}</div>
+      <h1 style="margin-top:6px">${esc(nomComplet(c))}</h1>
+      <p class="muted" style="margin-top:4px">${esc(a.sexe||"")}${age(a.naissance)!=null?" · "+age(a.naissance)+" ans":""} · ${esc(a.nationalite==="Autre"?a.nationaliteAutre:a.nationalite)} · ${esc(a.permis||"")}${a.ville?" · "+esc(a.ville)+" ("+esc(a.pays==="Autre"?a.paysAutre||"Autre":a.pays||"")+")":""} · ${esc(a.tel||"")}${a.email?" · "+esc(a.email):""}</p></div>
+     <div class="alerts">${al.length?al.map(([t,m])=>`<span class="pill ${t}">${esc(m)}</span>`).join(""):`<span class="pill ok">Aucune alerte</span>`}</div>
+     <div class="row"><label class="eyebrow" for="statut-sel">Statut</label>
+      <select id="statut-sel" data-a-change="statut" style="width:auto;min-height:42px">${STATUTS.map(x=>`<option value="${x[0]}" ${(c.statut||"nouveau")===x[0]?"selected":""}>${x[1]}</option>`).join("")}</select>
+      ${o.reco?`<span class="pill ${o.reco==="Oui"?"ok":o.reco==="Non"?"bad":"warn"}">Responsable : ${esc(o.reco)}</span>`:""}${o.arrivee&&o.arrivee.startsWith("Retard")?`<span class="pill warn">${esc(o.arrivee)}</span>`:""}${(o.caractere||[]).map(t=>`<span class="pill info">${esc(t)}</span>`).join("")}</div>
+     ${downloads?`<div><button class="btn sm primary" data-a="pdf" ${pdfBusy?"disabled":""}>${pdfBusy?"Préparation du PDF…":"Télécharger le dossier PDF (à imprimer)"}</button></div>`:""}
+    </div>
+    <div class="bigscore"><b>${s.total}</b><span>/100</span>${s.pending?`<div class="muted small">score provisoire</div>`:""}</div>
+   </div></div>
+
+   ${dupPanel(c)}
+   ${embauchePanel(c)}
+   ${essaiPanel(c)}
+
+   <div class="grid2">
+    <div class="panel"><div class="section-title"><h2>Détail du score</h2></div>
+     <div class="bars">${Object.values(s.P).map(p=>`<div class="bar"><span>${p.label}</span><div class="track"><div class="fill ${p.pending&&p.got===0?"pending":""}" style="width:${p.max?Math.max(p.pending&&p.got===0?100:0,p.got/p.max*100):0}%"></div></div><span class="num" style="text-align:right">${Math.round(p.got*10)/10}/${p.max}</span></div>`).join("")}</div>
+     ${s.pending?`<p class="hint" style="margin-top:14px">${s.P.oral.pending?"L'oral n'est pas encore noté. ":""}${s.P.fr.pending||s.P.en.pending?"Les textes écrits ne sont pas encore corrigés.":""}</p>`:""}
+     <div class="row" style="margin-top:16px">${!c.oral?`<button class="btn sm primary" data-a="toOralRH">Noter l'oral</button>`:`<button class="btn sm" data-a="toOralRH">Modifier l'oral</button>`}</div>
+    </div>
+    <div class="panel"><div class="section-title"><h2>Textes écrits</h2>${sample?`<button class="btn sm gold" data-a="ai" ${aiBusy?"disabled":""}>${aiBusy?"Correction…":c.ai?"Recorriger avec Claude":"Corriger avec Claude"}</button>`:""}</div>
+     ${aiMsg?`<p class="hint" style="margin-bottom:10px">${esc(aiMsg)}</p>`:""}
+     <div class="stack" style="gap:14px">
+      <div><div class="eyebrow">Phrase à corriger</div><div class="quote" style="margin-top:6px">${esc(a.fr?.t1||"—")}</div></div>
+      <div><div class="eyebrow">Présentation en français</div><div class="quote" style="margin-top:6px">${esc(a.fr?.t2||"—")}</div></div>
+      ${c.ai?.fr?`<p class="small"><b>Claude · ${c.ai.fr.score}/8</b> — ${esc(c.ai.fr.commentaire||"")}${(c.ai.fr.fautes||[]).length?`<br><span class="muted">Fautes : ${esc(c.ai.fr.fautes.join(" · "))}</span>`:""}</p>`:""}
+      <div class="row"><label class="small" for="m-fr">Note manuelle français /8</label><input id="m-fr" type="number" min="0" max="8" step="0.5" style="width:90px;min-height:40px" value="${esc(c.manual?.frText??"")}" data-a-change="manFr"></div>
+      <div><div class="eyebrow">Texte en anglais</div><div class="quote" style="margin-top:6px">${esc(a.en?.t1||"—")}</div></div>
+      ${c.ai?.en?`<p class="small"><b>Claude · ${c.ai.en.score}/5</b> — ${esc(c.ai.en.commentaire||"")}</p>`:""}
+      <div class="row"><label class="small" for="m-en">Note manuelle anglais /5</label><input id="m-en" type="number" min="0" max="5" step="0.5" style="width:90px;min-height:40px" value="${esc(c.manual?.enText??"")}" data-a-change="manEn"></div>
+      ${Object.entries(a.autres||{}).map(([l,t])=>{const nm=langLabel(a,l),ai=(c.ai?.autres||[]).find(x=>x.langue===nm||x.langue===l);return `<div><div class="eyebrow">Traduction en ${esc(nm)}</div><div class="quote" style="margin-top:6px">${esc(t)}</div>${ai?`<p class="small" style="margin-top:6px"><b>Niveau estimé : ${esc(ai.niveau)}</b> — ${esc(ai.commentaire||"")}</p>`:""}</div>`}).join("")}
+     </div>
+    </div>
+   </div>
+
+   <div class="grid2">
+    ${isCuisine(c)?`<div class="panel"><h2 style="margin-bottom:14px">Test cuisine</h2><p class="muted small" style="margin-bottom:10px">${CUISINE.filter((q,i)=>String(getP(a,"ktest."+i))===String(q.a)).length}/${CUISINE.length} justes</p>${ansQcm(CUISINE,"ktest",a)}</div>`:`<div class="panel"><h2 style="margin-bottom:14px">Calcul caisse</h2>
+     <p class="muted small" style="margin-bottom:10px">${CALC.filter((q,i)=>{const v=parseNum(getP(a,"calc.a."+i));return v!=null&&Math.abs(v-q.a)<0.011}).length}/${CALC.length} justes${calcTime?" · temps : "+Math.floor(calcTime/60)+" min "+String(calcTime%60).padStart(2,"0")+" s":""}</p>
+     <div class="ans">${CALC.map((q,i)=>{const v=parseNum(getP(a,"calc.a."+i)),ok=v!=null&&Math.abs(v-q.a)<0.011;return `<div class="ansline"><span class="mk ${ok?"y":"n"}">${ok?"✓":"✕"}</span><div>${esc(q.q)}<div class="muted small num">Réponse : ${v==null?"—":fmtCHF(v)}${ok?"":" · attendu "+fmtCHF(q.a)}</div></div></div>`}).join("")}</div>
+    </div>`}
+    <div class="panel"><h2 style="margin-bottom:14px">Situations & hygiène</h2>${ansQcm(SITU,"situ",a)}</div>
+   </div>
+
+   <div class="grid2">
+    <div class="panel"><h2 style="margin-bottom:14px">Français · QCM</h2>${ansQcm(FR_Q,"fr.q",a)}</div>
+    <div class="panel"><h2 style="margin-bottom:14px">Anglais · QCM</h2>${ansQcm(EN_Q,"en.q",a)}</div>
+   </div>
+
+   <div class="grid2">
+    <div class="panel"><h2 style="margin-bottom:14px">Disponibilités</h2>${kv([
+     ["Taux souhaité",esc(d.taux)],["Jours",esc((d.jours||[]).join(", "))],["Créneaux",esc(Array.isArray(d.creneaux)?d.creneaux.join(", "):d.creneaux)],["Week-end",esc(d.weekend)],
+     ["Emploi actuel",esc(d.emploi)],["Préavis",d.emploi&&d.emploi!=="Non"?esc(d.preavis):undefined],["Garde l'autre emploi",d.emploi&&d.emploi!=="Non"?esc(d.parallele):undefined],
+     ["N° AVS",a.avs?`<span class="num">${esc(a.avs)}</span>`:undefined],
+     ["Libre",esc(d.libre)],["Vacances",esc(d.vacances)+(d.vacancesDates?" ("+esc(d.vacancesDates)+")":"")],["Contraintes",esc(d.contraintes)],
+     ["Adresse",esc([a.adresse,[a.npa,a.ville].filter(Boolean).join(" "),a.pays==="Autre"?a.paysAutre:a.pays].filter(Boolean).join(", ")||a.commune)],["Trajet",esc(a.trajet)],["Transport",esc(a.transport)]])}</div>
+    <div class="panel"><h2 style="margin-bottom:14px">Expérience</h2>${kv([
+     ["Restauration",e.duree?esc(e.duree):(+(e.restoAns||0))+" an(s) "+(+(e.restoMois||0))+" mois"],["Fast-food",esc(e.fastfood)],["Caisse",esc(e.caisse)],["Cuisine",esc(e.cuisine)],
+     ["Dernier employeur",esc(e.employeur)],["Poste",esc(e.poste)],["Motif de départ",esc(e.depart)],["Formation HACCP",esc(e.haccp)],["Référence",esc(e.reference)]])}</div>
+   </div>
+
+   <div class="grid2">
+    <div class="panel"><h2 style="margin-bottom:14px">Langues</h2>${kv(langs.map(([l,v])=>[esc(l==="Autre"?(a.autreLangue||"Autre"):l),esc(v)+(oralLang(o,a,l)?` · oral <b class="num">${esc(oralLang(o,a,l))}/5</b>`:"")]))}</div>
+    <div class="panel"><h2 style="margin-bottom:14px">Tenue & hygiène</h2>${kv([
+     ["Barbe",a.sexe==="Homme"?esc(r.barbe)+(r.barbe==="Oui"?" → "+esc(r.barbeAction):""):undefined],["Piercings visibles",esc(r.piercing)+(r.piercing==="Oui"?" → enlève : "+esc(r.piercingOk):"")],
+     ["Tatouages visibles",esc(r.tatouage)+(r.tatouage==="Oui"?" → couvre : "+esc(r.tatouageOk):"")],["Cheveux longs",esc(r.cheveux)+(r.cheveux==="Oui"?" → attache : "+esc(r.cheveuxOk):"")],
+     ["Uniforme & casquette",esc(r.uniforme)],["Ongles",esc(r.ongles)],["Bijoux",esc(r.bijoux)]])}</div>
+   </div>
+
+   <div class="grid2">
+    <div class="panel"><h2 style="margin-bottom:14px">Motivation</h2>${kv([["Durée envisagée",esc(a.motiv?.duree)],["Source",esc(a.motiv?.source)],["Important pour lui/elle",esc(a.motiv?.important)],["Produit préféré",esc(a.motiv?.produit)],["Sa question",esc(a.motiv?.question)]])}</div>
+    <div class="panel"><h2 style="margin-bottom:14px">Entretien oral</h2>${c.oral?kv([["Arrivée",esc(o.arrivee||"")]].concat(ORAL.map(([k,l])=>[l,o[k]?`<b class="num">${o[k]}/5</b>`:"—"])).concat([["Caractère",esc((o.caractere||[]).join(", "))],["Commentaire",esc(o.commentaire)]])):`<p class="muted">Pas encore noté.</p>`}</div>
+   </div>
+
+   <div class="panel"><h2 style="margin-bottom:14px">Consentement & signature</h2>${kv([["Protection des données",a.consent?"Accepté le "+fmtDate(a.consentAt||c.createdAt):"Non recueilli"],["Accepte d'être recontacté",a.consentVivier?"Oui":"Non"],["Attestation",a.attest?"Réponses certifiées exactes":"—"],["Durée du test",a.consentAt&&c.createdAt?fmtDur(Math.round((c.createdAt-a.consentAt)/1000)):"—"],["Sorties de l'app",(a.sorties||[]).length?`<b style="color:var(--warn)">${a.sorties.length} fois</b> (${a.sorties.map(x=>fmtDur(x.s)).join(", ")})`:"Aucune"]])}
+    ${a.signature?`<div style="margin-top:14px"><div class="eyebrow">Signature</div><img src="${esc(a.signature)}" alt="Signature du candidat" class="sigimg"></div>`:""}</div>
+
+   <div class="panel"><div class="section-title"><h2>Documents</h2><span class="muted small">${(c.docs||[]).length} fichier${(c.docs||[]).length>1?"s":""}</span></div>
+    ${assets?`<div class="row" style="margin-bottom:16px"><select id="doc-type" style="width:auto;min-height:44px">${DOC_TYPES.map(t=>`<option>${esc(t)}</option>`).join("")}</select>
+     <label class="btn sm gold" for="doc-file" style="min-height:44px">${uploading?"Envoi en cours…":"Prendre une photo ou importer"}</label>
+     <input id="doc-file" type="file" accept="image/*,application/pdf" multiple hidden data-a-change="upload" ${uploading?"disabled":""}>
+     <span class="hint">Photo (JPG, PNG) ou PDF, 20 Mo max</span></div>`:`<p class="hint" style="margin-bottom:12px">Seul le propriétaire ou un éditeur de la page peut ajouter des documents.</p>`}
+    ${(c.docs||[]).length?`<div class="docs">${c.docs.map(d=>{const isImg=String(d.ct||"").startsWith("image/");return `<div class="doc"><a class="thumb" href="${window.__rh.docUrl(d.id)||"#"}" target="_blank" rel="noopener">${isImg?`<img src="${window.__rh.docUrl(d.id)}" alt="${esc(d.label)}" loading="lazy">`:`<span>PDF</span>`}</a>
+      <div class="meta"><div style="min-width:0"><b style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.label)}</b><span class="muted">${fmtDate(d.date)}</span></div>
+      ${assets?(confirmDoc===d.id?`<button class="btn sm danger" data-a="delDoc" data-id="${esc(d.id)}">Oui</button>`:`<button class="btn sm" data-a="askDelDoc" data-id="${esc(d.id)}" aria-label="Supprimer">✕</button>`):""}</div></div>`}).join("")}</div>`:`<p class="muted">Aucun document. Prenez en photo le CV, le permis ou un certificat.</p>`}
+   </div>
+
+   <div class="panel row between"><span class="muted small">${expireOf(c)?`Suppression automatique le <b>${fmtDate(expireOf(c))}</b> (6 mois après la dernière activité). <button class="btn sm" data-a="prolonger" data-id="${c.id}" style="margin-left:6px">Garder 6 mois de plus</button>`:"Candidat retenu : le dossier n'est pas supprimé automatiquement."}</span>
+    ${confirmDelete?`<div class="row"><span class="small"><b>Confirmer la suppression ?</b></span><button class="btn sm" data-a="cancelDel">Annuler</button><button class="btn sm danger" data-a="del">Supprimer</button></div>`:`<button class="btn sm danger" data-a="askDel">Supprimer le dossier</button>`}</div>
+  </div>`;
+}
+function renderSettings(){
+  return `${topBar(`<button class="btn sm" data-a="backRH">Retour</button>`)}
+  <div class="wrap stack"><h1>Code d'accès RH</h1>
+   <p class="muted">Ce code protège l'espace RH, l'évaluation orale et le déverrouillage de la tablette. Après 8 codes faux, l'accès est bloqué 15 minutes.</p>
+   ${errorMsg?`<div class="err">${esc(errorMsg)}</div>`:""}
+   <div class="field" style="max-width:280px"><label for="newpin">Nouveau code (6 chiffres)</label><input id="newpin" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></div>
+   <div class="field" style="max-width:280px"><label for="newpin2">Retapez le nouveau code</label><input id="newpin2" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></div>
+   <div><button class="btn primary" data-a="savePin">Enregistrer le code</button></div>
+  </div>`;
+}
+function renderPin(){
+  if(!pinCb)return "";
+  return `<div class="overlay"><div class="modal" role="dialog" aria-label="Code d'accès"><h3>Code d'accès</h3>
+   <div class="pinshow">${[0,1,2,3,4,5].map(i=>`<i class="${i<pinVal.length?"f":""}"></i>`).join("")}</div>
+   ${pinBusy?`<p class="muted small" style="text-align:center">Vérification…</p>`:pinErr?`<p class="err" style="text-align:center">${esc(pinErr)}</p>`:`<p class="muted small" style="text-align:center">Réservé au responsable et à la RH</p>`}
+   <div class="keypad">${[1,2,3,4,5,6,7,8,9].map(n=>`<button data-pin="${n}">${n}</button>`).join("")}<button data-pin="x" aria-label="Annuler">✕</button><button data-pin="0">0</button><button data-pin="b" aria-label="Effacer">⌫</button></div>
+  </div></div>`;
+}
+
+function render(){
+  const y=window.scrollY;
+  const V={home:renderHome,setup:renderSetup,intro:renderIntro,cand:renderCandidat,merci:renderMerci,oral:renderOral,rh:renderRH,planning:renderPlanning,vivier:renderVivier,detail:renderDetail,settings:renderSettings}[view];
+  const keyNow=view+"|"+(currentId||"")+"|"+step, snap=keyNow===lastRenderKey?captureForm():null; lastRenderKey=keyNow;
+  const lockOn=kiosk.locked&&candView();
+  $("#app").innerHTML=(lockOn?'<div inert>'+V()+'</div>':V())+renderLock()+renderPin();
+  restoreForm(snap);
+  if(view==="cand")sigInit();
+  return y;
+}
+let lastRenderKey="";
+function captureForm(){const root=$("#app");if(!root)return null;const vals={},act=document.activeElement;
+  root.querySelectorAll("input[id],textarea[id],select[id]").forEach(el=>{if(["checkbox","radio","file","hidden"].includes(el.type))return;
+    const def=el.tagName==="SELECT"?([...el.options].find(o=>o.defaultSelected)||el.options[0]||{}).value:el.defaultValue;if(el.value!==def)vals[el.id]=el.value});
+  root.querySelectorAll('input[type=radio][name^="es-"]:checked').forEach(el=>{if(!el.defaultChecked)vals["radio:"+el.name]=el.value});
+  const focusable=act&&act.id&&root.contains(act)&&/^(INPUT|TEXTAREA)$/.test(act.tagName)&&!["checkbox","radio"].includes(act.type);
+  return {vals,focus:focusable?act.id:null,sel:focusable&&act.selectionStart!=null?[act.selectionStart,act.selectionEnd]:null}}
+function restoreForm(sn){if(!sn)return;for(const [k,v] of Object.entries(sn.vals)){if(k.startsWith("radio:")){const r=[...document.querySelectorAll('input[type=radio]')].find(x=>x.name===k.slice(6)&&x.value===v);if(r)r.checked=true;continue}
+  const el=document.getElementById(k);if(el&&el.type!=="file")el.value=v}
+  if(sn.focus){const el=document.getElementById(sn.focus);if(el&&!el.closest("[inert]")){el.focus({preventScroll:true});try{if(sn.sel)el.setSelectionRange(sn.sel[0],sn.sel[1])}catch(e){}}}}
+function authOut(){try{window.__rh.out()}catch(e){}serverLoaded=false;lastPurge=0}
+function go(v){view=v;errorMsg="";confirmDelete=false;confirmDoc=null;aiMsg="";render();window.scrollTo(0,0)}
+function askPin(cb){pinCb=cb;pinVal="";pinErr="";render()}
+
+/* ============ MODE TABLETTE (kiosque) ============ */
+const IDLE_CAND=4*60e3, IDLE_RH=5*60e3, IDLE_WARN=60e3;
+let kiosk={locked:false,reason:""}, lastAct=Date.now(), awayStart=0, fsOn=false, wakeLock=null;
+const candView=()=>(view==="cand"||view==="intro")&&!!draft;
+const rhView=()=>["rh","planning","vivier","detail","settings","oral"].includes(view);
+const fmtDur=s=>s<60?s+" s":Math.floor(s/60)+" min "+pad(s%60)+" s";
+function enterFS(){try{const el=document.documentElement;if(!document.fullscreenElement&&el.requestFullscreen)el.requestFullscreen({navigationUI:"hide"}).then(()=>{fsOn=true}).catch(()=>{})}catch(e){}}
+async function wakeOn(){try{if(navigator.wakeLock&&!wakeLock){wakeLock=await navigator.wakeLock.request("screen");wakeLock.addEventListener("release",()=>{wakeLock=null})}}catch(e){}}
+const warnEl=document.createElement("div");warnEl.className="idlewarn";warnEl.hidden=true;warnEl.setAttribute("role","alert");document.body.appendChild(warnEl);
+function showWarn(sec){if(!sec){warnEl.hidden=true;return}warnEl.hidden=false;warnEl.textContent="Toujours là ? Touchez l'écran pour continuer. Verrouillage dans "+sec+" s."}
+function lockKiosk(reason){if(!candView())return;try{document.activeElement&&document.activeElement.blur()}catch(e){}kiosk={locked:true,reason};showWarn(0);render()}
+["pointerdown","keydown","input","wheel","touchstart"].forEach(t=>document.addEventListener(t,()=>{lastAct=Date.now();if(!warnEl.hidden)showWarn(0)},{capture:true,passive:true}));
+setInterval(()=>{const idle=Date.now()-lastAct;
+  if(candView()&&!kiosk.locked){if(idle>IDLE_CAND+IDLE_WARN)lockKiosk("Pas d'activité depuis plusieurs minutes.");else if(idle>IDLE_CAND)showWarn(Math.ceil((IDLE_CAND+IDLE_WARN-idle)/1000))}
+  else if(rhUnlocked&&!candView()&&idle>IDLE_RH&&!pinCb){rhUnlocked=false;authOut();oralDraft=null;go("home");toast("Espace RH verrouillé après 5 minutes sans activité")}
+  purgeExpired();
+},1000);
+document.addEventListener("visibilitychange",()=>{
+  if(!candView())return;
+  if(document.hidden){awayStart=Date.now();return}
+  wakeOn();
+  if(awayStart){const s=Math.max(1,Math.round((Date.now()-awayStart)/1000));(draft.answers.sorties||(draft.answers.sorties=[])).push({t:awayStart,s});awayStart=0;lockKiosk("L'application a été quittée pendant "+fmtDur(s)+".")}
+});
+document.addEventListener("fullscreenchange",()=>{if(document.fullscreenElement){fsOn=true;return}if(fsOn&&candView()&&!kiosk.locked){fsOn=false;lockKiosk("Le plein écran a été quitté.")}else fsOn=false});
+document.addEventListener("paste",e=>{if(candView()){e.preventDefault();toast("Le copier-coller est désactivé pendant le test")}},true);
+document.addEventListener("copy",e=>{if(candView())e.preventDefault()},true);
+document.addEventListener("contextmenu",e=>{if(candView())e.preventDefault()});
+window.addEventListener("beforeunload",e=>{if(candView()){e.preventDefault();e.returnValue=""}});
+function renderLock(){
+  if(!kiosk.locked||!candView())return "";
+  return `<div class="overlay lock" role="dialog" aria-label="Écran verrouillé"><div class="modal" style="text-align:center;align-items:center">${logoImg(70)}<h2>Écran verrouillé</h2><p>${esc(kiosk.reason)}</p><p class="muted">Appelez le responsable. Vos réponses sont gardées.</p><button class="btn primary" data-a="unlockKiosk">Déverrouiller (responsable)</button></div></div>`;
+}
+
+/* ============ ÉVÉNEMENTS ============ */
+document.addEventListener("input",ev=>{
+  const el=ev.target;
+  if(el.dataset.k&&draft){
+    if(el.dataset.multi){const arr=(getP(draft,el.dataset.k)||[]).filter(v=>v!==el.value);if(el.checked)arr.push(el.value);setP(draft,el.dataset.k,arr)}
+    else if(el.type==="checkbox")setP(draft,el.dataset.k,el.checked?true:"");
+    else setP(draft,el.dataset.k,el.value);
+    if(el.dataset.k==="answers.naissance"){const ag=age(el.value),bad=ag!=null&&ag<18,f=$("#naissance-field");if(f){f.classList.toggle("invalid",bad);f.querySelector(".fielderr").hidden=!bad}}
+    if(el.dataset.rr)render();
+  } else if(el.dataset.o&&oralDraft){
+    if(el.dataset.multi){const arr=(getP(oralDraft,el.dataset.o)||[]).filter(v=>v!==el.value);if(el.checked)arr.push(el.value);setP(oralDraft,el.dataset.o,arr)}
+    else setP(oralDraft,el.dataset.o,el.type==="radio"?+el.value||el.value:el.value)}
+  else if(el.dataset.f){filt[el.dataset.f]=el.value;if(el.dataset.f==="q"){const pos=el.selectionStart;render();const n=$("#rh-q");if(n){n.focus();n.setSelectionRange(pos,pos)}}else render()}
+});
+document.addEventListener("change",async ev=>{
+  const el=ev.target, act=el.dataset.aChange; if(!act)return;
+  const c=candidats.find(x=>x.id===currentId); if(!c||!db)return;
+  try{
+    if(act==="upload"){await uploadDocs(c,el);return}
+    if(act==="statut"){const upd={statut:el.value,keepFrom:Date.now()};if(el.value==="vivier"){upd.vivierAt=Date.now();upd.keepFrom=Date.now()}await db.doc("candidats/"+c.id).update(upd);toast(el.value==="vivier"?"Ajouté au vivier":"Statut mis à jour")}
+    if(act==="embItem"){await db.doc("candidats/"+c.id).update({embauche:{items:{[el.dataset.key]:el.checked}}});return}
+    if(act==="embField"){await db.doc("candidats/"+c.id).update({embauche:{[el.dataset.key]:el.value}});toast("Enregistré");return}
+    if(act==="manFr"||act==="manEn"){const k=act==="manFr"?"frText":"enText",v=el.value===""?null:+el.value;await db.doc("candidats/"+c.id).update({manual:{...(c.manual||{}),[k]:v}});toast("Note enregistrée")}
+  }catch(e){toast("Échec de l'enregistrement. Réessayez.")}
+});
+document.addEventListener("click",async ev=>{
+  const pb=ev.target.closest("[data-pin]");
+  if(pb){const k=pb.dataset.pin;
+    if(pinBusy)return;
+    if(k==="x"){pinCb=null;render();return}
+    if(k==="b"){pinVal=pinVal.slice(0,-1);pinErr="";render();return}
+    if(pinBusy)return;
+    if(pinVal.length<6)pinVal+=k;
+    if(pinVal.length===6){const code=pinVal;pinVal="";pinErr="";pinBusy=true;render();
+      const r=await window.__rh.verify(code);pinBusy=false;
+      if(r.ok){const cb=pinCb;pinCb=null;cb();return}
+      pinErr=r.error==="locked"?"Trop d'essais : réessayez dans 15 minutes.":r.error==="network"?"Pas de connexion internet.":"Code incorrect";}
+    render();return}
+  const b=ev.target.closest("[data-a]"); if(!b)return;
+  const a=b.dataset.a;
+  switch(a){
+   case "home":draft=null;rhUnlocked=false;authOut();go("home");break;
+   case "openRH":if(rhUnlocked)go(lastRH);else askPin(()=>{rhUnlocked=true;go(lastRH);purgeExpired()});break;
+   case "lock":rhUnlocked=false;authOut();go("home");break;
+   case "newInterview":rhUnlocked=false;authOut();draft={resto:"",poste:"",responsable:"",answers:{}};go("setup");break;
+   case "startCand":
+     if(!draft.resto||!draft.poste||!(draft.responsable||"").trim()){errorMsg="Choisissez le restaurant, le poste et indiquez votre nom.";render();break}
+     rhUnlocked=false;authOut();step=0;kiosk={locked:false,reason:""};lastAct=Date.now();enterFS();wakeOn();go("intro");break;
+   case "unlockKiosk":askPin(()=>{authOut();kiosk={locked:false,reason:""};lastAct=Date.now();enterFS();render()});break;
+   case "begin":if(!draft.answers.consent){errorMsg="Pour continuer, cochez la case « J'accepte » sur la protection des données.";render();break}
+     draft.answers.consentAt=Date.now();step=0;enterFS();wakeOn();go("cand");break;
+   case "sigClear":draft.answers.signature="";render();break;
+   case "quit":askPin(()=>{authOut();draft=null;kiosk={locked:false,reason:""};showWarn(0);go("home")});break;
+   case "prev":if(step>0){step--;errorMsg="";render();window.scrollTo(0,0)}break;
+   case "next":{
+     if(!validateStep()){render();window.scrollTo(0,0);break}
+     const vs=visibleSteps();
+     if(vs[step].t==="Calcul caisse")setP(draft,"answers.calc.end",Date.now());
+     if(step<vs.length-1){step++;render();window.scrollTo(0,0)}
+     else await submitCandidat(b);
+     break}
+   case "toOral":askPin(()=>{oralFromRH=false;oralDraft={langues:{}};go("oral")});break;
+   case "toOralRH":{const c=candidats.find(x=>x.id===currentId);oralFromRH=true;oralDraft=JSON.parse(JSON.stringify(c?.oral||{langues:{}}));go("oral");break}
+   case "saveOral":await saveOral(b);break;
+   case "backRH":go(lastRH);break;
+   case "tabListe":lastRH="rh";go("rh");break;
+   case "tabPlanning":lastRH="planning";go("planning");break;
+   case "tabVivier":lastRH="vivier";go("vivier");break;
+   case "rappeler":try{await db.doc("candidats/"+b.dataset.id).update({statut:"a_revoir",keepFrom:Date.now()});toast("Remis en « À revoir »")}catch(e){toast("Échec de l'enregistrement")}break;
+   case "prolonger":try{await db.doc("candidats/"+b.dataset.id).update({keepFrom:Date.now()});toast("Dossier gardé 6 mois de plus")}catch(e){toast("Échec de l'enregistrement")}break;
+   case "weekPrev":weekStart=new Date(weekStart.getFullYear(),weekStart.getMonth(),weekStart.getDate()-7);render();break;
+   case "weekNext":weekStart=new Date(weekStart.getFullYear(),weekStart.getMonth(),weekStart.getDate()+7);render();break;
+   case "weekToday":weekStart=startOfWeek(new Date());render();break;
+   case "saveEssai":{const c=candidats.find(x=>x.id===currentId);if(!c||!db)break;
+     const date=$("#es-date").value;if(!date){toast("Choisissez une date");break}
+     const essai={date,debut:$("#es-debut").value,fin:$("#es-fin").value,resto:$("#es-resto").value,responsable:$("#es-resp").value.trim(),note:$("#es-note").value.trim(),resultat:document.querySelector('input[name="es-res"]:checked')?.value||"prevu"};
+     const upd={essai};if(!c.statut||c.statut==="nouveau"||c.statut==="a_revoir")upd.statut="essai";
+     b.disabled=true;try{await db.doc("candidats/"+c.id).update(upd);toast(c.essai?.date?"Essai mis à jour":"Essai planifié")}catch(e){toast("Échec de l'enregistrement")}b.disabled=false;break}
+   case "delEssai":{const c=candidats.find(x=>x.id===currentId);if(!c||!db)break;
+     try{await db.doc("candidats/"+c.id).update({essai:null,...(c.statut==="essai"?{statut:"a_revoir"}:{})});toast("Essai annulé")}catch(e){toast("Échec")}break}
+   case "backDetail":go("detail");break;
+   case "open":currentId=b.dataset.id;go("detail");break;
+   case "settings":go("settings");break;
+   case "savePin":{const v=$("#newpin").value,v2=$("#newpin2").value;if(!/^\d{6}$/.test(v)){errorMsg="Le code doit faire 6 chiffres.";render();break}
+     if(v!==v2){errorMsg="Les deux codes ne sont pas identiques.";render();break}
+     b.disabled=true;const r=await window.__rh.setPin(v);b.disabled=false;
+     if(r.ok){toast("Code enregistré");go(lastRH)}else{errorMsg=r.error==="network"?"Pas de connexion internet.":"Impossible d'enregistrer le code.";render()}break}
+   case "askDel":confirmDelete=true;render();break;
+   case "cancelDel":confirmDelete=false;render();break;
+   case "askDelDoc":confirmDoc=b.dataset.id;render();break;
+   case "delDoc":{const c=candidats.find(x=>x.id===currentId),id=b.dataset.id;if(!c)break;
+     try{await db.doc("candidats/"+c.id).update({docs:(c.docs||[]).filter(d=>d.id!==id)});try{await assets?.delete(id)}catch(e){}confirmDoc=null;toast("Document supprimé")}catch(e){toast("Suppression impossible")}render();break}
+   case "del":try{const cd=candidats.find(x=>x.id===currentId);for(const d of (cd?.docs||[])){try{await assets?.delete(d.id)}catch(e){}}await db.doc("candidats/"+currentId).delete();toast("Dossier supprimé");go("rh")}catch(e){toast("Suppression impossible")}break;
+   case "ai":await runAI();break;
+   case "pdf":{const c=candidats.find(x=>x.id===currentId);if(!c||!downloads||pdfBusy)break;pdfBusy=true;render();
+     try{const {bytes,missing}=await buildDossier(c);
+       const slug=nomComplet(c).normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^a-zA-Z0-9]+/g,"-").replace(/^-|-$/g,"").toLowerCase()||"candidat";
+       pdfBusy=false;render();
+       await downloads.save({filename:"dossier-"+slug+".pdf",data:new Blob([bytes],{type:"application/pdf"})});
+       if(missing.length)toast("PDF prêt, sans : "+missing.join(", "));
+     }catch(e){pdfBusy=false;render();if(e?.code!=="declined")toast(e?.message==="load"?"Outil PDF indisponible, vérifiez la connexion.":"Création du PDF impossible.")}
+     break}
+   case "exportCSV":await exportCSV();break;
+  }
+});
+
+function cleanAnswers(src){
+  const a=JSON.parse(JSON.stringify(src||{})), d=a.dispo||{}, r=a.regles||{};
+  const keep=new Set(Object.keys(a.langues||{}).filter(k=>a.langues[k]&&a.langues[k]!=="Non"));
+  if(a.autres)for(const k of Object.keys(a.autres))if(!keep.has(k))delete a.autres[k];
+  if(!keep.has("Autre"))delete a.autreLangue;
+  if(d.vacances!=="Oui, déjà prévues")delete d.vacancesDates;
+  if(!d.emploi||d.emploi==="Non"){delete d.preavis;delete d.parallele}
+  if(a.sexe!=="Homme"){delete r.barbe;delete r.barbeAction}else if(r.barbe!=="Oui")delete r.barbeAction;
+  if(r.piercing!=="Oui")delete r.piercingOk; if(r.tatouage!=="Oui")delete r.tatouageOk; if(r.cheveux!=="Oui")delete r.cheveuxOk;
+  if(a.nationalite!=="Autre")delete a.nationaliteAutre; if(a.pays!=="Autre")delete a.paysAutre;
+  return a;
+}
+async function submitCandidat(btn){
+  if(!db){errorMsg="Enregistrement impossible : pas de connexion à la base. Appelez le responsable.";render();return}
+  btn.disabled=true;btn.textContent="Enregistrement…";
+  const doc={createdAt:Date.now(),resto:draft.resto,poste:draft.poste,responsable:draft.responsable.trim(),statut:"nouveau",answers:cleanAnswers(draft.answers)};
+  if(!draft._id)draft._id=db.collection("candidats").doc().id;
+  const ref=db.doc("candidats/"+draft._id);
+  const save=async()=>{await ref.set(doc);currentId=ref.id;if(!candidats.find(c=>c.id===ref.id))candidats.unshift({id:ref.id,...doc});draft=null;go("merci")};
+  try{await save()}
+  catch(e){
+    let r=e; if(e?.code==="unavailable"){await new Promise(z=>setTimeout(z,800+Math.random()*700));try{await save();return}catch(e2){r=e2}}
+    errorMsg=r?.code==="quota_exceeded"?"La base est pleine : supprimez d'anciens dossiers dans l'espace RH.":"L'enregistrement a échoué. Appelez le responsable puis touchez « Terminer » à nouveau.";
+    btn.disabled=false;btn.textContent="Terminer";render();
+  }
+}
+async function uploadDocs(c,el){
+  if(!assets)return; const files=[...(el.files||[])]; if(!files.length)return;
+  const label=$("#doc-type")?.value||"Autre"; uploading=true; render();
+  const docs=[...(c.docs||[])]; let fails=0, msg="";
+  for(const f of files){
+    try{const r=await assets.upload(f,{cand:c.id,label});docs.push({id:r.id,label,name:f.name,ct:r.contentType,date:Date.now()})}
+    catch(e){fails++;msg={too_large:"Fichier trop lourd (20 Mo max).",unsupported_type:"Format non accepté : photo JPG/PNG ou PDF.",quota_or_state:"Stockage plein : supprimez d'anciens documents.",rate_limited:"Trop d'envois d'un coup, réessayez."}[e?.code]||"Envoi impossible, réessayez."}
+  }
+  try{if(docs.length!==(c.docs||[]).length)await db.doc("candidats/"+c.id).update({docs})}catch(e){fails++;msg="Le document n'a pas pu être rattaché au dossier."}
+  uploading=false; render(); toast(fails?msg:(files.length>1?"Documents ajoutés":"Document ajouté"));
+}
+async function saveOral(btn){
+  if(!db||!currentId){toast("Enregistrement impossible");return}
+  btn.disabled=true;btn.textContent="Enregistrement…";
+  try{await db.doc("candidats/"+currentId).update({oral:{...oralDraft,date:Date.now()}});toast("Évaluation enregistrée");
+    if(oralFromRH)go("detail");else{authOut();go("home")}}
+  catch(e){btn.disabled=false;btn.textContent="Enregistrer l'évaluation";toast("Échec de l'enregistrement. Réessayez.")}
+}
+async function runAI(){
+  const c=candidats.find(x=>x.id===currentId); if(!c||!sample)return;
+  const a=c.answers||{};
+  const autres=Object.entries(a.autres||{}).map(([k,t])=>[langLabel(a,k),t]);
+  const prompt=`Tu corriges les textes d'un candidat à un poste en fast-food à Genève (Chic Chicken). Sois juste, factuel et bref. Un texte vide vaut 0.
+
+1) FRANÇAIS — note de 0 à 8 : orthographe et grammaire sur 5, clarté et respect de la consigne sur 3. Le candidat devait (a) recopier en corrigeant : "${FR_FAUTE}" (version attendue : "${FR_CORRECT}") et (b) se présenter en 3 à 5 phrases et dire pourquoi il veut travailler chez Chic Chicken.
+(a) : """${a.fr?.t1||""}"""
+(b) : """${a.fr?.t2||""}"""
+
+2) ANGLAIS — note de 0 à 5 (2-3 phrases : se présenter et dire pourquoi il veut ce poste) :
+"""${a.en?.t1||""}"""
+
+3) AUTRES LANGUES — le candidat devait traduire : « Bonjour, bienvenue chez Chic Chicken. Qu'est-ce que je vous sers ? Sur place ou à emporter ? ». Pour chaque langue, donne un niveau CECR estimé (A1 à C2, ou "pas dans cette langue") et un commentaire court en français.
+${autres.length?autres.map(([l,t])=>`- ${l} : """${t}"""`).join("\n"):"(aucune)"}
+
+Réponds uniquement avec ce JSON :
+{"fr":{"score":0,"fautes":["mot fautif → correction"],"commentaire":"une phrase"},"en":{"score":0,"commentaire":"une phrase"},"autres":[{"langue":"nom exact donné ci-dessus","niveau":"A2","commentaire":"une phrase"}]}`;
+  aiBusy=true;aiMsg="Claude lit les textes…";render();
+  try{
+    const r=await sample.json(prompt);
+    const clean={fr:{score:Math.min(8,Math.max(0,+r?.fr?.score||0)),fautes:Array.isArray(r?.fr?.fautes)?r.fr.fautes.slice(0,12).map(String):[],commentaire:String(r?.fr?.commentaire||"")},
+      en:{score:Math.min(5,Math.max(0,+r?.en?.score||0)),commentaire:String(r?.en?.commentaire||"")},
+      autres:Array.isArray(r?.autres)?r.autres.map(x=>({langue:String(x.langue||""),niveau:String(x.niveau||""),commentaire:String(x.commentaire||"")})):[],date:Date.now()};
+    await db.doc("candidats/"+c.id).update({ai:clean}); aiMsg="";toast("Textes corrigés");
+  }catch(e){
+    aiMsg={not_granted:"Correction automatique non autorisée : notez à la main.",sampling_disabled:"Correction automatique indisponible sur ce compte.",rate_limited:"Trop de demandes. Réessayez dans un moment.",invalid_json:"Réponse illisible. Réessayez."}[e?.code]||"La correction a échoué. Réessayez ou notez à la main.";
+  }
+  aiBusy=false;render();
+}
+let pdfLibP=null;
+function loadPdfLib(){if(window.PDFLib)return Promise.resolve(window.PDFLib);if(!pdfLibP)pdfLibP=new Promise((res,rej)=>{const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js";s.onload=()=>res(window.PDFLib);s.onerror=()=>{pdfLibP=null;rej(new Error("load"))};document.head.appendChild(s)});return pdfLibP}
+const WIN="–—‘’‚“”„•…€™œŒŠšŸŽž‹›‰ƒˆ˜†‡";
+const pdfTxt=s=>String(s??"").replace(/\r/g,"").replace(/\t/g," ").replace(/→/g,"->").replace(/[✓✔]/g,"OK").replace(/[✕✗]/g,"X").replace(/[   ]/g," ").split("").map(ch=>{const k=ch.charCodeAt(0);return ch==="\n"||(k>=32&&k<127)||(k>=160&&k<=255)||WIN.includes(ch)?ch:"?"}).join("");
+async function imgToJpeg(blob){const url=URL.createObjectURL(blob);try{const img=await new Promise((r,j)=>{const i=new Image();i.onload=()=>r(i);i.onerror=j;i.src=url});
+  const k=Math.min(1,1800/Math.max(img.naturalWidth,img.naturalHeight));const cv=document.createElement("canvas");cv.width=Math.max(1,Math.round(img.naturalWidth*k));cv.height=Math.max(1,Math.round(img.naturalHeight*k));
+  const ctx=cv.getContext("2d");ctx.fillStyle="#fff";ctx.fillRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,cv.width,cv.height);
+  const b=await new Promise(r=>cv.toBlob(r,"image/jpeg",0.85));return new Uint8Array(await b.arrayBuffer())}finally{URL.revokeObjectURL(url)}}
+async function buildDossier(c){
+  const {PDFDocument,StandardFonts,rgb}=await loadPdfLib();
+  const pdf=await PDFDocument.create();pdf.setTitle("Dossier "+pdfTxt(nomComplet(c)));
+  const F=await pdf.embedFont(StandardFonts.Helvetica),B=await pdf.embedFont(StandardFonts.HelveticaBold);
+  const W=595.28,H=841.89,M=46,INK=rgb(.11,.1,.09),MUT=rgb(.43,.41,.36),GOLD=rgb(.886,0,.1),RED=rgb(.76,.2,.17);
+  let page,y;const missing=[];
+  const newPage=()=>{page=pdf.addPage([W,H]);y=H-M};
+  const ensure=h=>{if(y-h<M+14)newPage()};
+  const wrap=(t,f,s,w)=>{const out=[];for(const para of pdfTxt(t).split("\n")){let line="";for(const word of para.split(/ +/)){let wd=word;while(f.widthOfTextAtSize(wd,s)>w&&wd.length>1){let n=wd.length;while(n>1&&f.widthOfTextAtSize(wd.slice(0,n),s)>w)n--;if(line){out.push(line);line=""}out.push(wd.slice(0,n));wd=wd.slice(n)}const test=line?line+" "+wd:wd;if(line&&f.widthOfTextAtSize(test,s)>w){out.push(line);line=wd}else line=test}out.push(line)}return out};
+  const text=(t,{f=F,s=10,color=INK}={})=>{for(const ln of wrap(t,f,s,W-2*M)){ensure(s*1.4);page.drawText(ln,{x:M,y:y-s,size:s,font:f,color});y-=s*1.4}};
+  const h2=t=>{ensure(52);y-=12;page.drawText(pdfTxt(t).toUpperCase(),{x:M,y:y-11,size:10.5,font:B,color:INK});y-=17;page.drawLine({start:{x:M,y},end:{x:W-M,y},thickness:1.2,color:GOLD});y-=8};
+  const row=(k,v)=>{if(v==null||String(v).trim()==="")v="—";const lines=wrap(v,F,10,W-2*M-150),kl=wrap(k,F,10,140),n=Math.max(lines.length,kl.length);for(let i=0;i<n;i++){ensure(14);if(kl[i])page.drawText(kl[i],{x:M,y:y-10,size:10,font:F,color:MUT});if(lines[i])page.drawText(lines[i],{x:M+150,y:y-10,size:10,font:F,color:INK});y-=14}y-=2};
+  const a=c.answers||{},s=scoreOf(c),al=alertsOf(c),d=a.dispo||{},e=a.exp||{},r=a.regles||{},o=c.oral||{},es=c.essai;
+  newPage();page.drawRectangle({x:0,y:H-10,width:W,height:10,color:GOLD});
+  try{const lg=await pdf.embedPng(LOGO_L);const lh=46,lw=lh*lg.width/lg.height;page.drawImage(lg,{x:M,y:y-lh,width:lw,height:lh});page.drawText("CHIC CHICKEN · DOSSIER DE CANDIDATURE",{x:M+lw+12,y:y-27,size:9,font:B,color:MUT});y-=lh+14}
+  catch(err){page.drawText("CHIC CHICKEN · DOSSIER DE CANDIDATURE",{x:M,y:y-9,size:9,font:B,color:MUT});y-=24}
+  const sc=s.total+" / 100";page.drawText(sc,{x:W-M-B.widthOfTextAtSize(sc,26),y:y-26,size:26,font:B,color:INK});
+  for(const ln of wrap(nomComplet(c),B,24,W-2*M-140)){page.drawText(ln,{x:M,y:y-24,size:24,font:B,color:INK});y-=30}y-=4;
+  text(`${c.poste||""} · ${c.resto||""} · entretien du ${fmtDate(c.createdAt)} avec ${c.responsable||"—"}`,{color:MUT});
+  text(`Statut : ${statutInfo(c.statut)[1]}${s.pending?" · score provisoire":""}${o.reco?" · avis du responsable : "+o.reco:""}`,{f:B});
+  if(al.length){y-=4;text("Alertes : "+al.map(x=>x[1]).join(" · "),{color:RED,f:B})}
+  h2("Score");Object.values(s.P).forEach(p=>row(p.label,(Math.round(p.got*10)/10)+" / "+p.max+(p.pending?"  (en attente)":"")));
+  if(es?.date){h2("Jour d'essai");row("Date",fmtLong(es.date)+" · "+(es.debut||"")+(es.fin?" – "+es.fin:""));row("Restaurant",es.resto);row("Responsable",es.responsable);row("Résultat",(RESULTATS.find(x=>x[0]===(es.resultat||"prevu"))||[])[1]);if(es.note)row("Remarque",es.note)}
+  if(c.statut==="retenu"){const em=c.embauche||{},it=em.items||{},list=EMB.filter(x=>!x[3]||x[3](c));h2("Embauche");row("Début",em.debut?fmtDate(em.debut):"");row("Restaurant",em.resto||c.essai?.resto||(c.resto!=="Pas encore défini"?c.resto:""));row("Taux / contrat",em.taux);list.forEach(x=>row(x[1],it[x[0]]?"Fait":"À faire"))}
+  const dpl=dupsOf(c);if(dpl.length){h2("Autres candidatures");dpl.forEach(x=>row(fmtDate(x.createdAt),(x.poste||"")+" · "+(x.resto||"")+" · "+statutInfo(x.statut)[1]+" · "+scoreOf(x).total+"/100"))}
+  h2("Identité");row("Sexe",a.sexe);row("Date de naissance",a.naissance?fmtDate(a.naissance)+" ("+age(a.naissance)+" ans)":"");row("Nationalité",a.nationalite==="Autre"?a.nationaliteAutre:a.nationalite);row("Permis",a.permis);if(a.avs)row("N° AVS",a.avs);
+  row("Adresse",[a.adresse,[a.npa,a.ville].filter(Boolean).join(" "),a.pays==="Autre"?a.paysAutre:a.pays].filter(Boolean).join(", ")||a.commune);row("Téléphone",a.tel);row("E-mail",a.email);row("Trajet",[a.trajet,a.transport].filter(Boolean).join(" · "));
+  h2("Disponibilités");row("Taux souhaité",d.taux);row("Jours",(d.jours||[]).join(", "));row("Créneaux",Array.isArray(d.creneaux)?d.creneaux.join(", "):d.creneaux);row("Week-end",d.weekend);
+  row("Emploi actuel",(d.emploi||"")+(d.emploi&&d.emploi!=="Non"&&d.preavis?" · préavis "+d.preavis:""));row("Début possible",d.libre);row("Vacances",(d.vacances||"")+(d.vacancesDates?" ("+d.vacancesDates+")":""));if(d.contraintes)row("Contraintes",d.contraintes);
+  h2("Expérience");row("Restauration",e.duree||((+(e.restoAns||0))+" an(s) "+(+(e.restoMois||0))+" mois"));row("Fast-food",e.fastfood);row("Caisse",e.caisse);row("Cuisine",e.cuisine);row("Dernier poste",[e.poste,e.employeur].filter(Boolean).join(" · "));if(e.depart)row("Motif de départ",e.depart);row("Formation HACCP",e.haccp);if(e.reference)row("Référence",e.reference);
+  h2("Langues");const lg=Object.entries(a.langues||{}).filter(([,v])=>v&&v!=="Non");if(!lg.length)row("Langues","");lg.forEach(([l,v])=>{const nm=l==="Autre"?(a.autreLangue||"Autre"):l,ai=(c.ai?.autres||[]).find(x=>x.langue===nm);row(nm,v+(oralLang(o,a,l)?" · oral "+oralLang(o,a,l)+"/5":"")+(ai?" · écrit "+ai.niveau:""))});
+  h2("Tests");const calcOk=CALC.filter((q,i)=>{const v=parseNum(getP(a,"calc.a."+i));return v!=null&&Math.abs(v-q.a)<0.011}).length,ct=a.calc?.start&&a.calc?.end?Math.round((a.calc.end-a.calc.start)/1000):null;
+  if(isCuisine(c))row("Test cuisine",CUISINE.filter((q,i)=>String(getP(a,"ktest."+i))===String(q.a)).length+" / "+CUISINE.length+" justes");else row("Calcul caisse",calcOk+" / "+CALC.length+" justes"+(ct?" · "+Math.floor(ct/60)+" min "+pad(ct%60)+" s":""));
+  row("Situations & hygiène",SITU.filter((q,i)=>String(getP(a,"situ."+i))===String(q.a)).length+" / "+SITU.length);
+  row("Français QCM",FR_Q.filter((q,i)=>String(getP(a,"fr.q."+i))===String(q.a)).length+" / "+FR_Q.length);
+  row("Anglais QCM",EN_Q.filter((q,i)=>String(getP(a,"en.q."+i))===String(q.a)).length+" / "+EN_Q.length);
+  h2("Textes écrits");row("Phrase corrigée",a.fr?.t1);row("Présentation",a.fr?.t2);if(c.ai?.fr)row("Correction français",c.ai.fr.score+"/8 · "+(c.ai.fr.commentaire||""));if(c.manual?.frText!=null)row("Note manuelle FR",c.manual.frText+"/8");
+  row("Texte anglais",a.en?.t1);if(c.ai?.en)row("Correction anglais",c.ai.en.score+"/5 · "+(c.ai.en.commentaire||""));if(c.manual?.enText!=null)row("Note manuelle EN",c.manual.enText+"/5");
+  Object.entries(a.autres||{}).forEach(([l,t])=>row("Traduction "+langLabel(a,l),t));
+  h2("Tenue & hygiène");if(a.sexe==="Homme")row("Barbe",(r.barbe||"")+(r.barbe==="Oui"?" -> "+(r.barbeAction||""):""));row("Piercings visibles",(r.piercing||"")+(r.piercing==="Oui"?" -> enlève : "+(r.piercingOk||""):""));
+  row("Tatouages visibles",(r.tatouage||"")+(r.tatouage==="Oui"?" -> couvre : "+(r.tatouageOk||""):""));row("Cheveux longs",(r.cheveux||"")+(r.cheveux==="Oui"?" -> attache : "+(r.cheveuxOk||""):""));row("Uniforme & casquette",r.uniforme);row("Ongles",r.ongles);row("Bijoux",r.bijoux);
+  h2("Motivation");row("Durée envisagée",a.motiv?.duree);row("Source",a.motiv?.source);if(a.motiv?.important)row("Important pour lui/elle",a.motiv.important);if(a.motiv?.produit)row("Produit préféré",a.motiv.produit);if(a.motiv?.question)row("Sa question",a.motiv.question);
+  h2("Consentement & signature");row("Protection des données",a.consent?"Accepté le "+fmtDate(a.consentAt||c.createdAt):"Non recueilli");row("Recontact (vivier)",a.consentVivier?"Oui":"Non");row("Attestation",a.attest?"Réponses certifiées exactes":"—");row("Durée du test",a.consentAt&&c.createdAt?fmtDur(Math.round((c.createdAt-a.consentAt)/1000)):"");row("Sorties de l'app",(a.sorties||[]).length?a.sorties.length+" fois ("+a.sorties.map(x=>fmtDur(x.s)).join(", ")+")":"Aucune");
+  if(a.signature){try{const sg=await pdf.embedPng(a.signature);const w=190,h=w*sg.height/sg.width;ensure(h+14);page.drawText("Signature",{x:M,y:y-10,size:10,font:F,color:MUT});page.drawImage(sg,{x:M+150,y:y-h,width:w,height:h});y-=h+8}catch(err){}}
+  h2("Entretien oral");if(c.oral){row("Arrivée",o.arrivee);ORAL.forEach(([k,l])=>row(l,o[k]?o[k]+" / 5":""));if((o.caractere||[]).length)row("Caractère",o.caractere.join(", "));if(o.commentaire)row("Commentaire",o.commentaire)}else row("Oral","Pas encore noté");
+  const docs=c.docs||[];if(docs.length){h2("Documents joints");docs.forEach(x=>row(x.label,(String(x.ct).includes("pdf")?"PDF":"Photo")+" · ajouté le "+fmtDate(x.date)))}
+  const nMain=pdf.getPageCount();
+  for(const x of docs){
+    try{const blob=await window.__rh.docBlob(x.id);
+      if(String(x.ct).includes("pdf")){const src=await PDFDocument.load(await blob.arrayBuffer(),{ignoreEncryption:true});const pages=await pdf.copyPages(src,src.getPageIndices());pages.forEach(p=>pdf.addPage(p))}
+      else{const jpg=await pdf.embedJpg(await imgToJpeg(blob));newPage();page.drawText(pdfTxt(x.label+" — "+nomComplet(c)),{x:M,y:y-13,size:13,font:B,color:INK});y-=30;
+        const mw=W-2*M,mh=y-M-10,k=Math.min(mw/jpg.width,mh/jpg.height,1.5);page.drawImage(jpg,{x:M+(mw-jpg.width*k)/2,y:y-jpg.height*k,width:jpg.width*k,height:jpg.height*k})}
+    }catch(err){missing.push(x.label)}
+  }
+  const all=pdf.getPages(),tag=pdfTxt("Chic Chicken · "+nomComplet(c));
+  all.slice(0,nMain).forEach((p,i)=>{const t=tag+" · page "+(i+1)+" / "+nMain;p.drawText(t,{x:M,y:24,size:8,font:F,color:MUT})});
+  return {bytes:await pdf.save(),missing};
+}
+async function exportCSV(){
+  if(!downloads)return;
+  const cols=["Nom","N° AVS","Téléphone","E-mail","Adresse","NPA","Ville","Pays","Restaurant","Poste","Date","Score","Provisoire","Statut","Permis","Âge","Langues","Week-end","Libre","Alertes"];
+  const q=v=>{let t=String(v??"");if(/^[=+\-@\t\r]/.test(t))t="'"+t;return '"'+t.replace(/"/g,'""')+'"'};
+  const rows=filtered().map(c=>{const a=c.answers||{},s=scoreOf(c);return [nomComplet(c),a.avs,a.tel,a.email,a.adresse,a.npa,a.ville,a.pays==="Autre"?a.paysAutre:a.pays,c.resto,c.poste,fmtDate(c.createdAt),s.total,s.pending?"oui":"non",statutInfo(c.statut)[1],a.permis,age(a.naissance),Object.entries(a.langues||{}).filter(([,v])=>v&&v!=="Non").map(([l,v])=>l+" ("+v+")").join(" ; "),a.dispo?.weekend,a.dispo?.libre,alertsOf(c).map(x=>x[1]).join(" ; ")].map(q).join(";")});
+  try{await downloads.save({filename:"candidats-chic-chicken.csv",data:"﻿"+[cols.map(q).join(";"),...rows].join("\n")})}
+  catch(e){if(e?.code!=="declined")toast("Export impossible ici")}
+}
+
+/* ============ DÉMARRAGE ============ */
+render();
+(async()=>{
+  try{
+    db=await claude.use("db");
+    [sample,downloads,assets]=await Promise.all([claude.use("sample"),claude.use("downloads"),claude.use("assets")]);
+  }catch(e){}
+  if(!db){dbNote="Connexion à la base impossible. Vérifiez la connexion internet de la tablette puis rechargez la page.";loaded=true;render();return}
+  loadTimer=setTimeout(()=>{if(!loaded){dbNote="Les données ne répondent pas encore. Vérifiez la connexion.";render()}},10000);
+  db.collection("candidats").orderBy("createdAt","desc").onSnapshot(snap=>{
+    candidats=snap.docs.map(d=>({id:d.id,...d.data()}));
+    if(!snap.metadata.fromCache){serverLoaded=true;loaded=true;clearTimeout(loadTimer);if(dbNote.startsWith("Les données"))dbNote=""}
+    else loaded=true;
+    if(view!=="cand"&&view!=="setup"&&view!=="intro"&&view!=="oral")render();
+    purgeExpired();
+  },err=>{clearTimeout(loadTimer);loaded=true;dbNote="Impossible de lire les candidats ("+err.code+").";render()});
+  db.doc("config/app").onSnapshot(s=>{configLoaded=true;config=s.exists?{pin:"1234",...s.data()}:{pin:"1234"}},()=>{});
+})();
+</script>
+
+<script>if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));</script>
+</body>
+</html>
