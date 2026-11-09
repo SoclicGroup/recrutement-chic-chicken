@@ -1055,15 +1055,15 @@ function renderSettings(){
   <div class="wrap stack"><h1>Code d'accès RH</h1>
    <p class="muted">Ce code protège l'espace RH, l'évaluation orale et le déverrouillage de la tablette. Après 8 codes faux, l'accès est bloqué 15 minutes.</p>
    ${errorMsg?`<div class="err">${esc(errorMsg)}</div>`:""}
-   <div class="field" style="max-width:280px"><label for="newpin">Nouveau code (6 chiffres)</label><input id="newpin" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></div>
-   <div class="field" style="max-width:280px"><label for="newpin2">Retapez le nouveau code</label><input id="newpin2" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></div>
+   <div class="field" style="max-width:280px"><label for="newpin">Nouveau code (4 chiffres)</label><input id="newpin" type="password" inputmode="numeric" maxlength="4" autocomplete="off"></div>
+   <div class="field" style="max-width:280px"><label for="newpin2">Retapez le nouveau code</label><input id="newpin2" type="password" inputmode="numeric" maxlength="4" autocomplete="off"></div>
    <div><button class="btn primary" data-a="savePin">Enregistrer le code</button></div>
   </div>`;
 }
 function renderPin(){
   if(!pinCb)return "";
   return `<div class="overlay"><div class="modal" role="dialog" aria-label="Code d'accès"><h3>Code d'accès</h3>
-   <div class="pinshow">${[0,1,2,3,4,5].map(i=>`<i class="${i<pinVal.length?"f":""}"></i>`).join("")}</div>
+   <div class="pinshow">${[0,1,2,3].map(i=>`<i class="${i<pinVal.length?"f":""}"></i>`).join("")}</div>
    ${pinBusy?`<p class="muted small" style="text-align:center">Vérification…</p>`:pinErr?`<p class="err" style="text-align:center">${esc(pinErr)}</p>`:`<p class="muted small" style="text-align:center">Réservé au responsable et à la RH</p>`}
    <div class="keypad">${[1,2,3,4,5,6,7,8,9].map(n=>`<button data-pin="${n}">${n}</button>`).join("")}<button data-pin="x" aria-label="Annuler">✕</button><button data-pin="0">0</button><button data-pin="b" aria-label="Effacer">⌫</button></div>
   </div></div>`;
@@ -1158,8 +1158,8 @@ document.addEventListener("click",async ev=>{
     if(k==="x"){pinCb=null;render();return}
     if(k==="b"){pinVal=pinVal.slice(0,-1);pinErr="";render();return}
     if(pinBusy)return;
-    if(pinVal.length<6)pinVal+=k;
-    if(pinVal.length===6){const code=pinVal;pinVal="";pinErr="";pinBusy=true;render();
+    if(pinVal.length<4)pinVal+=k;
+    if(pinVal.length===4){const code=pinVal;pinVal="";pinErr="";pinBusy=true;render();
       const r=await window.__rh.verify(code);pinBusy=false;
       if(r.ok){const cb=pinCb;pinCb=null;cb();return}
       pinErr=r.error==="locked"?"Trop d'essais : réessayez dans 15 minutes.":r.error==="network"?"Pas de connexion internet.":"Code incorrect";}
@@ -1209,7 +1209,7 @@ document.addEventListener("click",async ev=>{
    case "backDetail":go("detail");break;
    case "open":currentId=b.dataset.id;go("detail");break;
    case "settings":go("settings");break;
-   case "savePin":{const v=$("#newpin").value,v2=$("#newpin2").value;if(!/^\d{6}$/.test(v)){errorMsg="Le code doit faire 6 chiffres.";render();break}
+   case "savePin":{const v=$("#newpin").value,v2=$("#newpin2").value;if(!/^\d{4}$/.test(v)){errorMsg="Le code doit faire 4 chiffres.";render();break}
      if(v!==v2){errorMsg="Les deux codes ne sont pas identiques.";render();break}
      b.disabled=true;const r=await window.__rh.setPin(v);b.disabled=false;
      if(r.ok){toast("Code enregistré");go(lastRH)}else{errorMsg=r.error==="network"?"Pas de connexion internet.":"Impossible d'enregistrer le code.";render()}break}
